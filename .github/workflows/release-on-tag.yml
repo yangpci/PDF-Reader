@@ -1,0 +1,49 @@
+# 推送形如 v1.2.3 的 tag 时：Release 构建、打包 ZIP、创建/更新 GitHub Release 并附上产物。
+#
+# GitHub Fork/PR：默认 GITHUB_TOKEN 即可写 Release（需仓库 Settings → Actions → General 中允许）。
+# macOS Runner 无法进行你的个人「自动签名」（无 Apple 开发者证书）；此工作流产出未签名 .app，
+# 适合自用分发；若要公证/上架，需在本地 Xcode 用你的 Team 归档并公证。
+
+name: Release on tag
+
+on:
+  push:
+    tags:
+      - "v*" # 例如 v1.0.0
+
+permissions:
+  contents: write
+
+jobs:
+  macos-build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build (Release, unsigned for CI)
+        run: |
+          set -eo pipefail
+          xcodebuild -project PDF-Reader.xcodeproj \
+            -scheme PDF-Reader \
+            -configuration Release \
+            -destination "platform=macOS" \
+            -derivedDataPath "${{ github.workspace }}/build" \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=NO \
+            DEVELOPMENT_TEAM= \
+            build
+
+      - name: Zip application
+        run: |
+          set -eo pipefail
+          APP="${{ github.workspace }}/build/Build/Products/Release/PDF Reader.app"
+          test -d "$APP"
+          ditto -c -k --keepParent "$APP" "${{ github.workspace }}/PDF-Reader-${{ github.ref_name }}-macOS.zip"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: PDF-Reader-${{ github.ref_name }}-macOS.zip
+          generate_release_notes: true

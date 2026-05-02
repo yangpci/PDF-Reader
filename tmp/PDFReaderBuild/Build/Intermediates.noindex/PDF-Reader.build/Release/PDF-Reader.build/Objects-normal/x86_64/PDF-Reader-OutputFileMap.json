@@ -1,0 +1,66 @@
+{
+  "" : {
+    "const-values" : "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/tmp/PDFReaderBuild/Build/Intermediates.noindex/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/PDF-Reader-primary.swiftconstvalues",
+    "dependencies" : "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/tmp/PDFReaderBuild/Build/Intermediates.noindex/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/PDF-Reader-primary.d",
+    "diagnostics" : "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/tmp/PDFReaderBuild/Build/Intermediates.noindex/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/PDF-Reader-primary.dia",
+    "emit-module-dependencies" : "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/tmp/PDFReaderBuild/Build/Intermediates.noindex/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/PDF-Reader-primary-emit-module.d",
+    "emit-module-diagnostics" : "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/tmp/PDFReaderBuild/Build/Intermediates.noindex/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/PDF-Reader-primary-emit-module.dia",
+    "pch" : "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/tmp/PDFReaderBuild/Build/Intermediates.noindex/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/PDF-Reader-primary-Bridging-header.pch",
+    "swift-dependencies" : "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/tmp/PDFReaderBuild/Build/Intermediates.noindex/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/PDF-Reader-primary.swiftdeps"
+  },
+  "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/PDF-Reader/AppPersistence.swift" : {
+    "index-unit-output-path" : "/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/AppPersistence.o",
+    "llvm-bc" : "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/tmp/PDFReaderBuild/Build/Intermediates.noindex/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/AppPersistence.bc",
+    "object" : "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/tmp/PDFReaderBuild/Build/Intermediates.noindex/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/AppPersistence.o"
+  },
+  "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/PDF-Reader/AppTheme.swift" : {
+    "index-unit-output-path" : "/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/AppTheme.o",
+    "llvm-bc" : "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/tmp/PDFReaderBuild/Build/Intermediates.noindex/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/AppTheme.bc",
+    "object" : "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/tmp/PDFReaderBuild/Build/Intermediates.noindex/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/AppTheme.o"
+  },
+  "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/PDF-Reader/ContentView.swift" : {
+    "index-unit-output-path" : "/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/ContentView.o",
+    "llvm-bc" : "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/tmp/PDFReaderBuild/Build/Intermediates.noindex/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/ContentView.bc",
+    "object" : "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/tmp/PDFReaderBuild/Build/Intermediates.noindex/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/ContentView.o"
+  },
+  "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/PDF-Reader/EpubCoverExtractor.swift" : {
+    "index-unit-output-path" : "/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/EpubCoverExtractor.o",
+    "llvm-bc" : "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/tmp/PDFReaderBuild/Build/Intermediates.noindex/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/EpubCoverExtractor.bc",
+    "object" : "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/tmp/PDFReaderBuild/Build/Intermediates.noindex/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/EpubCoverExtractor.o"
+  },
+  "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/PDF-Reader/EpubRuntimeManager.swift" : {
+    "index-unit-output-path" : "/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/EpubRuntimeManager.o",
+    "llvm-bc" : "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/tmp/PDFReaderBuild/Build/Intermediates.noindex/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/EpubRuntimeManager.bc",
+    "object" : "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/tmp/PDFReaderBuild/Build/Intermediates.noindex/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/EpubRuntimeManager.o"
+  },
+  "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/PDF-Reader/EpubRuntimeSchemeHandler.swift" : {
+    "index-unit-output-path" : "/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/EpubRuntimeSchemeHandler.o",
+    "llvm-bc" : "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/tmp/PDFReaderBuild/Build/Intermediates.noindex/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/EpubRuntimeSchemeHandler.bc",
+    "object" : "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/tmp/PDFReaderBuild/Build/Intermediates.noindex/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/EpubRuntimeSchemeHandler.o"
+  },
+  "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/PDF-Reader/EpubWebReaderView.swift" : {
+    "index-unit-output-path" : "/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/EpubWebReaderView.o",
+    "llvm-bc" : "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/tmp/PDFReaderBuild/Build/Intermediates.noindex/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/EpubWebReaderView.bc",
+    "object" : "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/tmp/PDFReaderBuild/Build/Intermediates.noindex/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/EpubWebReaderView.o"
+  },
+  "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/PDF-Reader/PDFKitReaderView.swift" : {
+    "index-unit-output-path" : "/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/PDFKitReaderView.o",
+    "llvm-bc" : "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/tmp/PDFReaderBuild/Build/Intermediates.noindex/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/PDFKitReaderView.bc",
+    "object" : "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/tmp/PDFReaderBuild/Build/Intermediates.noindex/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/PDFKitReaderView.o"
+  },
+  "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/PDF-Reader/PDF_ReaderApp.swift" : {
+    "index-unit-output-path" : "/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/PDF_ReaderApp.o",
+    "llvm-bc" : "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/tmp/PDFReaderBuild/Build/Intermediates.noindex/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/PDF_ReaderApp.bc",
+    "object" : "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/tmp/PDFReaderBuild/Build/Intermediates.noindex/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/PDF_ReaderApp.o"
+  },
+  "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/PDF-Reader/ReaderViewModel.swift" : {
+    "index-unit-output-path" : "/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/ReaderViewModel.o",
+    "llvm-bc" : "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/tmp/PDFReaderBuild/Build/Intermediates.noindex/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/ReaderViewModel.bc",
+    "object" : "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/tmp/PDFReaderBuild/Build/Intermediates.noindex/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/ReaderViewModel.o"
+  },
+  "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/tmp/PDFReaderBuild/Build/Intermediates.noindex/PDF-Reader.build/Release/PDF-Reader.build/DerivedSources/GeneratedAssetSymbols.swift" : {
+    "index-unit-output-path" : "/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/GeneratedAssetSymbols.o",
+    "llvm-bc" : "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/tmp/PDFReaderBuild/Build/Intermediates.noindex/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/GeneratedAssetSymbols.bc",
+    "object" : "/Users/yangpci/Public/WorkSpaces/AppleWorkSpace/PDF-Reader/tmp/PDFReaderBuild/Build/Intermediates.noindex/PDF-Reader.build/Release/PDF-Reader.build/Objects-normal/x86_64/GeneratedAssetSymbols.o"
+  }
+}
