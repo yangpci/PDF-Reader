@@ -8,8 +8,19 @@ import PDFKit
 import QuartzCore
 import SwiftUI
 
-/// 新版 macOS 上部分 PDF 在 `PDFView` 默认「文本选择」路径会触发 CoreGraphics `PageLayout::getWordRange` SIGILL。
-/// 左键不再调用 `super.mouseDown`，避免进入 `trackStandardTextSelection`；左键拖动用内容区平移代替。
+/// AppKit 在部分 SDK / Swift 模式下未导出 `NSImmediateActionGestureRecognizer` 符号，运行时按类名识别。
+private let kImmediateActionGestureClass: AnyClass? =
+    NSClassFromString("NSImmediateActionGestureRecognizer")
+
+private func isImmediateActionGestureRecognizer(_ gr: NSGestureRecognizer) -> Bool {
+    guard let cls = kImmediateActionGestureClass else { return false }
+    return gr.isKind(of: cls)
+}
+
+/// 新版 macOS 上部分 PDF 在 `PDFView` 默认「文本选择 / Lookup」路径会触发 CoreGraphics `PageLayout::getWordRange` SIGILL。
+/// 1) 拒绝并剥离 `NSImmediateActionGestureRecognizer`（事件仍会经 `_sendMouseEventToGestureRecognizers` 走到
+///    `-[PDFView immediateActionRecognizerWillPrepare:]`，仅改 mouseDown 不够）。
+/// 2) 左键不再调用 `super.mouseDown`，避免进入 `trackStandardTextSelection`；左键拖动用内容区平移代替。
 private final class StablePDFView: PDFView {
     private var isPanning = false
     private var lastMouseInWindow = NSPoint.zero
@@ -17,6 +28,27 @@ private final class StablePDFView: PDFView {
     /// AppKit `PDFView` 未在 Swift 中公开 `scrollView`；内嵌的 `NSScrollView` 通常为首个子视图。
     private var embeddedClipView: NSClipView? {
         subviews.compactMap { ($0 as? NSScrollView)?.contentView }.first
+    }
+
+    /// `PDFView` 可能在自身或内嵌 document 视图上注册 Immediate Action；递归剥离以免漏网。
+    private func removeImmediateActionGestureRecognizers(from root: NSView, depth: Int = 0) {
+        guard depth < 32 else { return }
+        for gr in Array(root.gestureRecognizers) where isImmediateActionGestureRecognizer(gr) {
+            root.removeGestureRecognizer(gr)
+        }
+        for child in root.subviews {
+            removeImmediateActionGestureRecognizers(from: child, depth: depth + 1)
+        }
+    }
+
+    override func addGestureRecognizer(_ gestureRecognizer: NSGestureRecognizer) {
+        if isImmediateActionGestureRecognizer(gestureRecognizer) { return }
+        super.addGestureRecognizer(gestureRecognizer)
+    }
+
+    override func layout() {
+        super.layout()
+        removeImmediateActionGestureRecognizers(from: self)
     }
 
     override func mouseDown(with event: NSEvent) {

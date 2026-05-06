@@ -1,2 +1,0 @@
-Target dependency graph (1 target)
-Target 'PDF-Reader' in project 'PDF-Reader' (no dependencies)
