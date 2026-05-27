@@ -149,9 +149,10 @@ struct PDFKitReaderView: NSViewRepresentable {
     var currentPage: Int
     var onPageChange: (Int) -> Void
     var onDocumentLoaded: (Int) -> Void
+    var onScaleChange: (CGFloat, Bool) -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onPageChange: onPageChange, onDocumentLoaded: onDocumentLoaded)
+        Coordinator(onPageChange: onPageChange, onDocumentLoaded: onDocumentLoaded, onScaleChange: onScaleChange)
     }
 
     func makeNSView(context: Context) -> PDFView {
@@ -162,6 +163,8 @@ struct PDFKitReaderView: NSViewRepresentable {
         pdfView.displayDirection = .vertical
         pdfView.pageBreakMargins = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
         context.coordinator.pdfView = pdfView
+        context.coordinator.scaleMode = scaleMode
+        context.coordinator.customScale = customScale
         if let doc = document {
             pdfView.document = doc
             context.coordinator.applyScale(pdfView: pdfView, mode: scaleMode, custom: customScale)
@@ -173,15 +176,25 @@ struct PDFKitReaderView: NSViewRepresentable {
             name: .PDFViewPageChanged,
             object: pdfView
         )
+        NotificationCenter.default.addObserver(
+            context.coordinator,
+            selector: #selector(Coordinator.scaleChanged(_:)),
+            name: .PDFViewScaleChanged,
+            object: pdfView
+        )
         return pdfView
     }
 
     func updateNSView(_ pdfView: PDFView, context: Context) {
         context.coordinator.onPageChange = onPageChange
         context.coordinator.onDocumentLoaded = onDocumentLoaded
+        context.coordinator.onScaleChange = onScaleChange
+        context.coordinator.scaleMode = scaleMode
+        context.coordinator.customScale = customScale
         pdfView.backgroundColor = theme.pdfReaderChromeNSColor
         if pdfView.document !== document {
             pdfView.document = document
+            context.coordinator.resetScaleApplicationState()
             if let doc = document {
                 context.coordinator.notifyDocument(doc)
             }
@@ -200,22 +213,47 @@ struct PDFKitReaderView: NSViewRepresentable {
 
     static func dismantleNSView(_ nsView: PDFView, coordinator: Coordinator) {
         NotificationCenter.default.removeObserver(coordinator, name: .PDFViewPageChanged, object: nsView)
+        NotificationCenter.default.removeObserver(coordinator, name: .PDFViewScaleChanged, object: nsView)
     }
 
     final class Coordinator: NSObject {
         weak var pdfView: PDFView?
         var onPageChange: (Int) -> Void
         var onDocumentLoaded: (Int) -> Void
+        var onScaleChange: (CGFloat, Bool) -> Void
+        var scaleMode: PDFKitViewModel.ScaleMode = .fitHeight
+        var customScale: CGFloat = 1.0
         /// 用于在「适应高度 → 适应宽度」时把滚动位置收到页顶，避免仍停在页中。
         private var lastAppliedScaleMode: PDFKitViewModel.ScaleMode?
+        private var lastAppliedScaleFactor: CGFloat?
+        private var suppressScaleNotification = false
 
-        init(onPageChange: @escaping (Int) -> Void, onDocumentLoaded: @escaping (Int) -> Void) {
+        init(
+            onPageChange: @escaping (Int) -> Void,
+            onDocumentLoaded: @escaping (Int) -> Void,
+            onScaleChange: @escaping (CGFloat, Bool) -> Void
+        ) {
             self.onPageChange = onPageChange
             self.onDocumentLoaded = onDocumentLoaded
+            self.onScaleChange = onScaleChange
         }
 
         func notifyDocument(_ doc: PDFDocument) {
             onDocumentLoaded(doc.pageCount)
+            focusReader()
+        }
+
+        /// 打开文件后把焦点交给阅读区；页码框已禁止自动 first responder，无需与 TextField 抢焦点。
+        func focusReader() {
+            guard let pdfView else { return }
+            let assign = {
+                _ = pdfView.window?.makeFirstResponder(pdfView)
+            }
+            if pdfView.window != nil {
+                assign()
+            } else {
+                DispatchQueue.main.async { assign() }
+            }
         }
 
         @objc func pageChanged(_ notification: Notification) {
@@ -224,6 +262,16 @@ struct PDFKitReaderView: NSViewRepresentable {
             if idx != NSNotFound {
                 onPageChange(idx + 1)
             }
+        }
+
+        @objc func scaleChanged(_ notification: Notification) {
+            guard !suppressScaleNotification, let pv = pdfView else { return }
+            onScaleChange(pv.scaleFactor, true)
+        }
+
+        func resetScaleApplicationState() {
+            lastAppliedScaleMode = nil
+            lastAppliedScaleFactor = nil
         }
 
         /// 将视口对齐到指定页顶部（与 `currentPage` 一致时才执行，避免误滚）。
@@ -246,20 +294,32 @@ struct PDFKitReaderView: NSViewRepresentable {
             let viewSize = pdfView.bounds.size
             guard pageRect.width > 0, pageRect.height > 0, viewSize.width > 0, viewSize.height > 0 else { return }
 
-            let previousMode = lastAppliedScaleMode
-
+            let targetScale: CGFloat
             switch mode {
             case .fitWidth:
-                let s = (viewSize.width - 48) / pageRect.width
-                pdfView.scaleFactor = min(max(s, 0.05), 10)
+                targetScale = min(max((viewSize.width - 48) / pageRect.width, 0.05), 10)
             case .fitHeight:
-                let s = (viewSize.height - 48) / pageRect.height
-                pdfView.scaleFactor = min(max(s, 0.05), 10)
+                targetScale = min(max((viewSize.height - 48) / pageRect.height, 0.05), 10)
             case .custom:
-                pdfView.scaleFactor = min(max(custom, 0.25), 5.0)
+                targetScale = min(max(custom, 0.25), 5.0)
             }
 
+            if lastAppliedScaleMode == mode,
+               let last = lastAppliedScaleFactor,
+               abs(last - targetScale) < 0.001,
+               abs(pdfView.scaleFactor - targetScale) < 0.001 {
+                return
+            }
+
+            let previousMode = lastAppliedScaleMode
+
+            suppressScaleNotification = true
+            pdfView.scaleFactor = targetScale
+            suppressScaleNotification = false
+
             lastAppliedScaleMode = mode
+            lastAppliedScaleFactor = targetScale
+            onScaleChange(targetScale, false)
 
             if mode == .fitWidth, previousMode == .fitHeight {
                 scrollToTop(of: page, on: pdfView)

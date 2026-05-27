@@ -3,6 +3,7 @@
 //  PDF-Reader
 //
 
+import AppKit
 import SwiftUI
 import PDFKit
 import UniformTypeIdentifiers
@@ -50,6 +51,9 @@ struct ContentView: View {
         } message: {
             Text("为当前阅读位置保存书签")
         }
+        .background {
+            ReadingArrowKeyHandler(viewModel: vm)
+        }
     }
 
     private var topBar: some View {
@@ -84,17 +88,15 @@ struct ContentView: View {
                     Image(systemName: "chevron.left")
                 }
                 .disabled(vm.mode == .pdf && vm.pdfCurrentPage <= 1)
-                .keyboardShortcut(.leftArrow, modifiers: [])
 
                 HStack(spacing: 6) {
                     if vm.mode == .pdf {
-                        TextField("", value: $vm.pdfCurrentPage, format: .number)
-                            .frame(width: 44)
-                            .textFieldStyle(.roundedBorder)
-                            .multilineTextAlignment(.center)
-                            .onSubmit {
-                                vm.goPdfPage(vm.pdfCurrentPage)
-                            }
+                        PdfPageNumberField(
+                            page: $vm.pdfCurrentPage,
+                            fileToken: vm.currentFilePath,
+                            onSubmit: { vm.goPdfPage(vm.pdfCurrentPage) }
+                        )
+                        .frame(width: 44)
                     } else {
                         Text(vm.epubDisplayedPage.map(String.init) ?? "—")
                             .foregroundStyle(vm.uiTheme.dimText)
@@ -110,7 +112,6 @@ struct ContentView: View {
                     Image(systemName: "chevron.right")
                 }
                 .disabled(vm.mode == .pdf && vm.pdfCurrentPage >= vm.pdfTotalPages)
-                .keyboardShortcut(.rightArrow, modifiers: [])
 
                 Divider().frame(height: 18)
 
@@ -430,12 +431,12 @@ struct ContentView: View {
                 },
                 onDocumentLoaded: { total in
                     vm.pdfTotalPages = total
+                },
+                onScaleChange: { scale, userInitiated in
+                    vm.syncPdfScaleFromReader(scale, userInitiated: userInitiated)
                 }
             )
             .background(vm.uiTheme.pdfBg)
-            .onChange(of: vm.pdfScaleMode) { _, _ in vm.updateZoomField() }
-            .onChange(of: vm.pdfCustomScale) { _, _ in vm.updateZoomField() }
-            .onChange(of: vm.pdfCurrentPage) { _, _ in vm.updateZoomField() }
         }
     }
 
@@ -653,5 +654,159 @@ struct ContentView: View {
             return true
         }
         return false
+    }
+}
+
+// MARK: - 阅读区方向键翻页（文本框编辑时不拦截，以便左右键移动光标）
+
+private struct ReadingArrowKeyHandler: NSViewRepresentable {
+    @ObservedObject var viewModel: ReaderViewModel
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(viewModel: viewModel)
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        context.coordinator.installMonitor()
+        return NSView(frame: .zero)
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.removeMonitor()
+    }
+
+    final class Coordinator {
+        private weak var viewModel: ReaderViewModel?
+        private var monitor: Any?
+
+        init(viewModel: ReaderViewModel) {
+            self.viewModel = viewModel
+        }
+
+        func installMonitor() {
+            guard monitor == nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self, let vm = viewModel else { return event }
+                guard vm.mode == .pdf || vm.mode == .epub else { return event }
+                guard event.modifierFlags.intersection([.command, .control, .option]).isEmpty else { return event }
+
+                let keyCode = event.keyCode
+                guard keyCode == 123 || keyCode == 124 else { return event }
+                guard !Self.isEditingText(in: NSApp.keyWindow) else { return event }
+
+                vm.stepReading(delta: keyCode == 123 ? -1 : 1)
+                return nil
+            }
+        }
+
+        func removeMonitor() {
+            if let monitor {
+                NSEvent.removeMonitor(monitor)
+                self.monitor = nil
+            }
+        }
+
+        private static func isEditingText(in window: NSWindow?) -> Bool {
+            guard let responder = window?.firstResponder else { return false }
+            if responder is NSTextField { return true }
+            if let textView = responder as? NSTextView, textView.isFieldEditor { return true }
+            return false
+        }
+    }
+}
+
+// MARK: - 页码输入（禁止窗口打开时自动成为 first responder，避免焦点闪动）
+
+private struct PdfPageNumberField: NSViewRepresentable {
+    @Binding var page: Int
+    var fileToken: String?
+    var onSubmit: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(page: $page, onSubmit: onSubmit)
+    }
+
+    func makeNSView(context: Context) -> ClickToFocusTextField {
+        let field = ClickToFocusTextField()
+        field.isBezeled = true
+        field.bezelStyle = .roundedBezel
+        field.isEditable = true
+        field.isSelectable = true
+        field.drawsBackground = true
+        field.alignment = .center
+        field.font = .systemFont(ofSize: NSFont.systemFontSize)
+        field.delegate = context.coordinator
+        field.target = context.coordinator
+        field.action = #selector(Coordinator.submit(_:))
+        field.stringValue = String(page)
+        context.coordinator.field = field
+        return field
+    }
+
+    func updateNSView(_ field: ClickToFocusTextField, context: Context) {
+        if context.coordinator.fileToken != fileToken {
+            context.coordinator.fileToken = fileToken
+            field.deactivateFocus()
+        }
+        let text = String(page)
+        if field.stringValue != text, field.currentEditor() == nil {
+            field.stringValue = text
+        }
+    }
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        @Binding var page: Int
+        var onSubmit: () -> Void
+        weak var field: ClickToFocusTextField?
+        var fileToken: String?
+
+        init(page: Binding<Int>, onSubmit: @escaping () -> Void) {
+            _page = page
+            self.onSubmit = onSubmit
+        }
+
+        @objc func submit(_ sender: Any?) {
+            syncPageFromField()
+            onSubmit()
+            field?.deactivateFocus()
+            field?.window?.makeFirstResponder(nil)
+        }
+
+        func controlTextDidEndEditing(_ obj: Notification) {
+            syncPageFromField()
+        }
+
+        private func syncPageFromField() {
+            guard let raw = field?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
+                  let n = Int(raw), n > 0 else { return }
+            page = n
+        }
+    }
+}
+
+private final class ClickToFocusTextField: NSTextField {
+    private var userWantsFocus = false
+
+    override var acceptsFirstResponder: Bool { userWantsFocus }
+
+    func deactivateFocus() {
+        userWantsFocus = false
+        if window?.firstResponder === currentEditor() || window?.firstResponder === self {
+            window?.makeFirstResponder(nil)
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        userWantsFocus = true
+        window?.makeFirstResponder(self)
+        super.mouseDown(with: event)
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let ok = super.resignFirstResponder()
+        if ok { userWantsFocus = false }
+        return ok
     }
 }

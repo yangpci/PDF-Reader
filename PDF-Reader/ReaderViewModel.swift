@@ -201,7 +201,6 @@ final class ReaderViewModel: ObservableObject {
             pdfOutline = []
         }
         pdfScaleMode = .fitHeight
-        updateZoomField()
         setStatus("已打开 · 共 \(pdfTotalPages) 页")
         scheduleSavePdfPosition()
     }
@@ -423,7 +422,6 @@ final class ReaderViewModel: ObservableObject {
             return
         }
         pdfScaleMode = .fitWidth
-        updateZoomField()
     }
 
     func fitHeight() {
@@ -433,7 +431,23 @@ final class ReaderViewModel: ObservableObject {
             return
         }
         pdfScaleMode = .fitHeight
-        updateZoomField()
+    }
+
+    /// PDFView 实际缩放变化时同步工具栏百分比（双指缩放、适应宽/高等）。
+    func syncPdfScaleFromReader(_ scale: CGFloat, userInitiated: Bool) {
+        guard mode == .pdf else { return }
+        let clamped = min(max(scale, 0.05), 10)
+        let newText = "\(Int(round(clamped * 100)))%"
+
+        if userInitiated, pdfScaleMode != .custom {
+            pdfScaleMode = .custom
+        }
+        if abs(pdfCustomScale - clamped) > 0.001 {
+            pdfCustomScale = clamped
+        }
+        if zoomFieldText != newText {
+            zoomFieldText = newText
+        }
     }
 
     func applyZoomFieldEditingEnded() {
@@ -460,14 +474,7 @@ final class ReaderViewModel: ObservableObject {
         case .epub:
             zoomFieldText = "\(epubFontPercent)%"
         case .pdf:
-            let pct: Int
-            switch pdfScaleMode {
-            case .fitWidth, .fitHeight:
-                pct = 100
-            case .custom:
-                pct = Int(round(pdfCustomScale * 100))
-            }
-            zoomFieldText = "\(pct)%"
+            zoomFieldText = "\(Int(round(pdfCustomScale * 100)))%"
         default:
             zoomFieldText = "100%"
         }
