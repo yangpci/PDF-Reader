@@ -47,8 +47,12 @@ final class ReaderViewModel: ObservableObject {
     @Published var pdfSpreadDouble: Bool = false
     @Published var pdfScaleMode: PDFKitViewModel.ScaleMode = .fitHeight
     @Published var pdfCustomScale: CGFloat = 1.0
+    @Published var pdfScaleApplyToken = UUID()
     @Published var pdfCurrentPage: Int = 1
     @Published var pdfTotalPages: Int = 0
+    @Published var pdfViewportAnchor: CGPoint?
+    @Published var pdfScrollOrigin: CGPoint?
+    @Published var pdfViewportRestoreToken = UUID()
 
     @Published var epubSession: EpubLoadSession?
     @Published var epubFontPercent: Int = 110
@@ -85,6 +89,9 @@ final class ReaderViewModel: ObservableObject {
     private var persistence: AppPersistenceData
     private var coverCache: [String: NSImage] = [:]
     private var savePositionTask: Task<Void, Never>?
+    private var saveSnapshotTask: Task<Void, Never>?
+    /// 仅本次 App 运行有效：关窗再开恢复缩放/页内位置；退出 App 后自动清空。
+    private var sessionPdfSnapshots: [String: PdfReadingSnapshot] = [:]
     private struct PendingBookmark {
         var label: String
         var path: String
@@ -199,21 +206,97 @@ final class ReaderViewModel: ObservableObject {
         pdfDocument = doc
         mode = .pdf
         pdfTotalPages = doc.pageCount
-        let saved = persistence.readingPositions[key]
-        var start = 1
-        if let v = saved {
-            if let d = v.numberValue { start = max(1, Int(d)) }
-        }
-        pdfCurrentPage = min(max(1, start), max(1, doc.pageCount))
+        loadPdfReadingState(for: key, pageCount: doc.pageCount)
         bookmarks = persistence.bookmarks[key] ?? []
         if let outline = doc.outlineRoot {
             pdfOutline = PDFOutlineFlat.flatten(outline, document: doc)
         } else {
             pdfOutline = []
         }
-        pdfScaleMode = .fitHeight
+        updateZoomField()
         setStatus("已打开 · 共 \(pdfTotalPages) 页")
-        scheduleSavePdfPosition()
+    }
+
+    private func loadPdfReadingState(for key: String, pageCount: Int) {
+        pdfViewportAnchor = nil
+        pdfScrollOrigin = nil
+        if let session = sessionPdfSnapshots[key] {
+            applySessionPdfSnapshot(session, pageCount: pageCount)
+            return
+        }
+        pdfScaleMode = .fitHeight
+        pdfCustomScale = 1.0
+        var start = 1
+        if let saved = persistence.readingPositions[key], let page = saved.numberValue {
+            start = max(1, Int(page))
+        } else if let snap = persistence.pdfReadingSnapshots[key] {
+            start = snap.page
+        }
+        pdfCurrentPage = min(max(1, start), max(1, pageCount))
+        bumpPdfScaleApply()
+    }
+
+    private func applySessionPdfSnapshot(_ snap: PdfReadingSnapshot, pageCount: Int) {
+        if let x = snap.anchorX, let y = snap.anchorY {
+            pdfViewportAnchor = CGPoint(x: x, y: y)
+        }
+        if let x = snap.scrollOriginX, let y = snap.scrollOriginY {
+            pdfScrollOrigin = CGPoint(x: x, y: y)
+        }
+        if let scale = snap.scale, scale > 0 {
+            pdfCustomScale = CGFloat(scale)
+            pdfScaleMode = pdfScaleMode(fromStorage: snap.scaleMode)
+        } else {
+            pdfScaleMode = .fitHeight
+            pdfCustomScale = 1.0
+        }
+        pdfCurrentPage = min(max(1, snap.page), max(1, pageCount))
+        if pdfViewportAnchor != nil || pdfScrollOrigin != nil {
+            bumpPdfViewportRestore()
+        }
+        bumpPdfScaleApply()
+    }
+
+    private func currentPdfSessionSnapshot(page: Int) -> PdfReadingSnapshot {
+        PdfReadingSnapshot(
+            page: page,
+            anchorX: pdfViewportAnchor.map { Double($0.x) },
+            anchorY: pdfViewportAnchor.map { Double($0.y) },
+            scale: Double(pdfCustomScale),
+            scaleMode: pdfScaleModeStorageValue(pdfScaleMode),
+            scrollOriginX: pdfScrollOrigin.map { Double($0.x) },
+            scrollOriginY: pdfScrollOrigin.map { Double($0.y) }
+        )
+    }
+
+    private func storeSessionPdfSnapshot(_ snap: PdfReadingSnapshot, key: String) {
+        sessionPdfSnapshots[key] = snap
+        persistence.readingPositions[key] = .double(Double(snap.page))
+        persist()
+    }
+
+    private func pdfScaleMode(fromStorage value: String?) -> PDFKitViewModel.ScaleMode {
+        switch value {
+        case "fitWidth": return .fitWidth
+        case "fitHeight": return .fitHeight
+        default: return .custom
+        }
+    }
+
+    private func pdfScaleModeStorageValue(_ mode: PDFKitViewModel.ScaleMode) -> String {
+        switch mode {
+        case .fitWidth: return "fitWidth"
+        case .fitHeight: return "fitHeight"
+        case .custom: return "custom"
+        }
+    }
+
+    private func bumpPdfScaleApply() {
+        pdfScaleApplyToken = UUID()
+    }
+
+    private func bumpPdfViewportRestore() {
+        pdfViewportRestoreToken = UUID()
     }
 
     private func openEpubFile(url: URL) {
@@ -386,6 +469,9 @@ final class ReaderViewModel: ObservableObject {
     }
 
     func goPdfPage(_ page: Int) {
+        pdfViewportAnchor = nil
+        pdfScrollOrigin = nil
+        bumpPdfViewportRestore()
         let t = min(max(1, page), max(1, pdfTotalPages))
         pdfCurrentPage = t
         scheduleSavePdfPosition()
@@ -417,6 +503,7 @@ final class ReaderViewModel: ObservableObject {
         }
         pdfScaleMode = .custom
         pdfCustomScale = min(5.0, pdfCustomScale + 0.25)
+        bumpPdfScaleApply()
         updateZoomField()
     }
 
@@ -428,6 +515,7 @@ final class ReaderViewModel: ObservableObject {
         }
         pdfScaleMode = .custom
         pdfCustomScale = max(0.25, pdfCustomScale - 0.25)
+        bumpPdfScaleApply()
         updateZoomField()
     }
 
@@ -437,6 +525,7 @@ final class ReaderViewModel: ObservableObject {
             updateZoomField()
             return
         }
+        bumpPdfScaleApply()
         pdfScaleMode = .fitWidth
     }
 
@@ -446,7 +535,23 @@ final class ReaderViewModel: ObservableObject {
             updateZoomField()
             return
         }
+        bumpPdfScaleApply()
         pdfScaleMode = .fitHeight
+    }
+
+    /// 窗口重新打开时仅触发页内视口恢复；缩放已在内存/持久化中，勿重复 force 应用以免冲掉滚动位置。
+    func refreshPdfScaleAfterWindowRestore() {
+        guard mode == .pdf, pdfDocument != nil else { return }
+        bumpPdfViewportRestore()
+    }
+
+    /// 窗口关闭或切后台时立即写入 PDF 阅读快照（避免 debounce 未落盘）。
+    func flushPdfReadingSnapshot() {
+        guard mode == .pdf, let path = currentFilePath else { return }
+        saveSnapshotTask?.cancel()
+        saveSnapshotTask = nil
+        let key = normalizePath(path)
+        storeSessionPdfSnapshot(currentPdfSessionSnapshot(page: pdfCurrentPage), key: key)
     }
 
     /// PDFView 实际缩放变化时同步工具栏百分比（双指缩放、适应宽/高等）。
@@ -455,7 +560,11 @@ final class ReaderViewModel: ObservableObject {
         let clamped = min(max(scale, 0.05), 10)
         let newText = "\(Int(round(clamped * 100)))%"
 
-        if userInitiated, pdfScaleMode != .custom {
+        if userInitiated {
+            if pdfScaleMode != .custom {
+                pdfScaleMode = .custom
+            }
+        } else if pdfScaleMode == .fitWidth || pdfScaleMode == .fitHeight {
             pdfScaleMode = .custom
         }
         if abs(pdfCustomScale - clamped) > 0.001 {
@@ -481,7 +590,73 @@ final class ReaderViewModel: ObservableObject {
             let clamped = min(500, max(25, n))
             pdfScaleMode = .custom
             pdfCustomScale = CGFloat(clamped / 100.0)
+            bumpPdfScaleApply()
             updateZoomField()
+        }
+    }
+
+    /// dismantle / 后台切换时直接写磁盘，不修改 @Published。
+    func persistPdfSnapshotDirect(
+        page: Int,
+        anchorX: CGFloat,
+        anchorY: CGFloat,
+        scale: CGFloat,
+        scrollOriginX: CGFloat? = nil,
+        scrollOriginY: CGFloat? = nil
+    ) {
+        guard mode == .pdf, let path = currentFilePath else { return }
+        let key = normalizePath(path)
+        let clampedPage = min(max(1, page), max(1, pdfTotalPages))
+        let snap = PdfReadingSnapshot(
+            page: clampedPage,
+            anchorX: Double(anchorX),
+            anchorY: Double(anchorY),
+            scale: Double(scale),
+            scaleMode: pdfScaleModeStorageValue(pdfScaleMode),
+            scrollOriginX: scrollOriginX.map { Double($0) },
+            scrollOriginY: scrollOriginY.map { Double($0) }
+        )
+        storeSessionPdfSnapshot(snap, key: key)
+    }
+
+    func capturePdfViewport(
+        page: Int,
+        anchorX: CGFloat?,
+        anchorY: CGFloat?,
+        scale: CGFloat,
+        scrollOriginX: CGFloat? = nil,
+        scrollOriginY: CGFloat? = nil
+    ) {
+        let clampedPage = min(max(1, page), max(1, pdfTotalPages))
+        let ax = anchorX
+        let ay = anchorY
+        let scaleValue = scale
+        let originX = scrollOriginX
+        let originY = scrollOriginY
+        Task { @MainActor in
+            guard mode == .pdf, let path = currentFilePath else { return }
+            if let ax, let ay {
+                pdfViewportAnchor = CGPoint(x: ax, y: ay)
+            }
+            if let originX, let originY {
+                pdfScrollOrigin = CGPoint(x: originX, y: originY)
+            }
+            let key = normalizePath(path)
+            saveSnapshotTask?.cancel()
+            saveSnapshotTask = Task {
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                guard !Task.isCancelled else { return }
+                let snap = PdfReadingSnapshot(
+                    page: clampedPage,
+                    anchorX: ax.map { Double($0) },
+                    anchorY: ay.map { Double($0) },
+                    scale: Double(scaleValue),
+                    scaleMode: pdfScaleModeStorageValue(pdfScaleMode),
+                    scrollOriginX: originX.map { Double($0) },
+                    scrollOriginY: originY.map { Double($0) }
+                )
+                storeSessionPdfSnapshot(snap, key: key)
+            }
         }
     }
 
@@ -499,12 +674,14 @@ final class ReaderViewModel: ObservableObject {
     func scheduleSavePdfPosition() {
         guard let path = currentFilePath, mode == .pdf else { return }
         let key = normalizePath(path)
+        let page = pdfCurrentPage
         savePositionTask?.cancel()
         savePositionTask = Task {
             try? await Task.sleep(nanoseconds: 1_000_000_000)
             guard !Task.isCancelled else { return }
-            persistence.readingPositions[key] = .double(Double(pdfCurrentPage))
-            persist()
+            var snap = sessionPdfSnapshots[key] ?? currentPdfSessionSnapshot(page: page)
+            snap.page = page
+            storeSessionPdfSnapshot(snap, key: key)
         }
     }
 

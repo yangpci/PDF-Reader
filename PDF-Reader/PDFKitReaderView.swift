@@ -17,6 +17,97 @@ private func isImmediateActionGestureRecognizer(_ gr: NSGestureRecognizer) -> Bo
     return gr.isKind(of: cls)
 }
 
+/// 捕获/恢复页内滚动：与 StablePDFView 左键平移相同，直接操作 NSClipView，不用 `go(to:on:)`。
+private enum PDFViewportScroll {
+    struct Parts {
+        let scrollView: NSScrollView
+        let clip: NSClipView
+        let docView: NSView
+    }
+
+    static func readBandOffset(visibleHeight: CGFloat) -> CGFloat {
+        min(120, max(visibleHeight * 0.12, 24))
+    }
+
+    static func parts(from pdfView: PDFView) -> Parts? {
+        guard let scrollView = pdfView.subviews.compactMap({ $0 as? NSScrollView }).first,
+              let docView = pdfView.documentView else { return nil }
+        return Parts(scrollView: scrollView, clip: scrollView.contentView, docView: docView)
+    }
+
+    static func capturePageAnchor(from pdfView: PDFView, page: PDFPage) -> CGPoint? {
+        guard let p = parts(from: pdfView) else { return nil }
+        let visible = p.clip.documentVisibleRect
+        let readBandY = visible.minY + readBandOffset(visibleHeight: visible.height)
+        let docPoint = NSPoint(x: visible.midX, y: readBandY)
+        let viewPoint = p.docView.convert(docPoint, to: pdfView)
+        return pdfView.convert(viewPoint, to: page)
+    }
+
+    static func captureScrollOrigin(from pdfView: PDFView) -> NSPoint? {
+        parts(from: pdfView)?.clip.bounds.origin
+    }
+
+    static func applyScrollOrigin(_ origin: NSPoint, in pdfView: PDFView) -> Bool {
+        guard let p = parts(from: pdfView) else { return false }
+        pdfView.layoutDocumentView()
+        let constrained = p.clip.constrainScroll(origin)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        p.clip.setBoundsOrigin(constrained)
+        p.scrollView.reflectScrolledClipView(p.clip)
+        CATransaction.commit()
+        return true
+    }
+
+    @discardableResult
+    static func restoreViewport(
+        pagePoint: CGPoint,
+        scrollOrigin: NSPoint?,
+        on page: PDFPage,
+        in pdfView: PDFView
+    ) -> Bool {
+        guard pdfView.currentPage === page else { return false }
+        if let scrollOrigin, applyScrollOrigin(scrollOrigin, in: pdfView) {
+            return true
+        }
+        return scrollToPageAnchor(pagePoint, on: page, in: pdfView)
+    }
+
+    @discardableResult
+    static func scrollToPageAnchor(_ pagePoint: CGPoint, on page: PDFPage, in pdfView: PDFView) -> Bool {
+        guard pdfView.currentPage === page, let p = parts(from: pdfView) else { return false }
+
+        pdfView.layoutDocumentView()
+
+        let viewPoint = pdfView.convert(pagePoint, from: page)
+        let docPoint = p.docView.convert(viewPoint, from: pdfView)
+        let visible = p.clip.bounds.size
+        let readOffset = readBandOffset(visibleHeight: visible.height)
+        let pageRect = pageRectInDocument(page, pdfView: pdfView, parts: p)
+
+        var originX = docPoint.x - visible.width * 0.5
+        if pageRect.width <= visible.width + 1 {
+            originX = pageRect.midX - visible.width * 0.5
+        }
+
+        let origin = p.clip.constrainScroll(NSPoint(x: originX, y: docPoint.y - readOffset))
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        p.clip.setBoundsOrigin(origin)
+        p.scrollView.reflectScrolledClipView(p.clip)
+        CATransaction.commit()
+        return true
+    }
+
+    static func pageRectInDocument(_ page: PDFPage, pdfView: PDFView, parts: Parts) -> CGRect {
+        let pageBounds = page.bounds(for: .mediaBox)
+        let inView = pdfView.convert(pageBounds, from: page)
+        return parts.docView.convert(inView, from: pdfView)
+    }
+}
+
 /// 新版 macOS 上部分 PDF 在 PDFKit 默认「文本选择 / Lookup / 右键菜单查词」路径会触发
 /// CoreGraphics `PageLayout::getWordRange` SIGILL。
 /// 1) 拒绝并剥离 `NSImmediateActionGestureRecognizer`（事件仍会经 `_sendMouseEventToGestureRecognizers` 走到
@@ -26,6 +117,8 @@ private func isImmediateActionGestureRecognizer(_ gr: NSGestureRecognizer) -> Bo
 private final class StablePDFView: PDFView {
     private var isPanning = false
     private var lastMouseInWindow = NSPoint.zero
+    var onBoundsReadyForScale: (() -> Void)?
+    var onViewportInteractionEnded: (() -> Void)?
 
     /// AppKit `PDFView` 未在 Swift 中公开 `scrollView`；内嵌的 `NSScrollView` 通常为首个子视图。
     private var embeddedClipView: NSClipView? {
@@ -51,6 +144,9 @@ private final class StablePDFView: PDFView {
     override func layout() {
         super.layout()
         removeImmediateActionGestureRecognizers(from: self)
+        if bounds.width > 0, bounds.height > 0 {
+            onBoundsReadyForScale?()
+        }
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -126,6 +222,7 @@ private final class StablePDFView: PDFView {
     override func mouseUp(with event: NSEvent) {
         if isPanning {
             isPanning = false
+            onViewportInteractionEnded?()
             return
         }
         super.mouseUp(with: event)
@@ -133,6 +230,7 @@ private final class StablePDFView: PDFView {
 
     override func scrollWheel(with event: NSEvent) {
         super.scrollWheel(with: event)
+        onViewportInteractionEnded?()
     }
 
     override func magnify(with event: NSEvent) {
@@ -146,13 +244,25 @@ struct PDFKitReaderView: NSViewRepresentable {
     var spreadMode: PDFDisplayMode
     var scaleMode: PDFKitViewModel.ScaleMode
     var customScale: CGFloat
+    var scaleApplyToken: UUID
     var currentPage: Int
+    var viewportAnchor: CGPoint?
+    var viewportScrollOrigin: CGPoint?
+    var viewportRestoreToken: UUID
     var onPageChange: (Int) -> Void
     var onDocumentLoaded: (Int) -> Void
     var onScaleChange: (CGFloat, Bool) -> Void
+    var onViewportCapture: (Int, CGFloat?, CGFloat?, CGFloat, CGFloat?, CGFloat?) -> Void
+    var onPersistViewportSnapshot: (Int, CGFloat, CGFloat, CGFloat, CGFloat?, CGFloat?) -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onPageChange: onPageChange, onDocumentLoaded: onDocumentLoaded, onScaleChange: onScaleChange)
+        Coordinator(
+            onPageChange: onPageChange,
+            onDocumentLoaded: onDocumentLoaded,
+            onScaleChange: onScaleChange,
+            onViewportCapture: onViewportCapture,
+            onPersistViewportSnapshot: onPersistViewportSnapshot
+        )
     }
 
     func makeNSView(context: Context) -> PDFView {
@@ -162,13 +272,43 @@ struct PDFKitReaderView: NSViewRepresentable {
         pdfView.displayMode = spreadMode
         pdfView.displayDirection = .vertical
         pdfView.pageBreakMargins = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
+        pdfView.onBoundsReadyForScale = { [weak coordinator = context.coordinator] in
+            coordinator?.retryPendingScaleApplyIfNeeded()
+            coordinator?.retryPendingViewportRestoreIfNeeded()
+        }
         context.coordinator.pdfView = pdfView
         context.coordinator.scaleMode = scaleMode
         context.coordinator.customScale = customScale
+        wireViewportCallbacks(on: pdfView, coordinator: context.coordinator)
+        pdfView.alphaValue = viewportAnchor != nil ? 0 : 1
         if let doc = document {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
             pdfView.document = doc
-            context.coordinator.applyScale(pdfView: pdfView, mode: scaleMode, custom: customScale)
+            if currentPage >= 1, currentPage <= doc.pageCount,
+               let page = doc.page(at: currentPage - 1) {
+                pdfView.go(to: page)
+            }
+            _ = context.coordinator.consumeViewportRestoreToken(viewportRestoreToken)
+            if let viewportAnchor {
+                context.coordinator.scheduleViewportRestore(
+                    anchor: viewportAnchor,
+                    scrollOrigin: viewportScrollOrigin
+                )
+            }
+            context.coordinator.invalidateAppliedScaleCache()
+            context.coordinator.markScaleApplyPending()
+            context.coordinator.tryApplyPendingScale(
+                pdfView: pdfView,
+                mode: scaleMode,
+                custom: customScale,
+                force: true
+            )
             context.coordinator.notifyDocument(doc)
+            if let page = pdfView.currentPage {
+                context.coordinator.tryRestoreScheduledViewport(on: pdfView, page: page)
+            }
+            CATransaction.commit()
         }
         NotificationCenter.default.addObserver(
             context.coordinator,
@@ -189,12 +329,16 @@ struct PDFKitReaderView: NSViewRepresentable {
         context.coordinator.onPageChange = onPageChange
         context.coordinator.onDocumentLoaded = onDocumentLoaded
         context.coordinator.onScaleChange = onScaleChange
+        context.coordinator.onViewportCapture = onViewportCapture
+        context.coordinator.onPersistViewportSnapshot = onPersistViewportSnapshot
         context.coordinator.scaleMode = scaleMode
         context.coordinator.customScale = customScale
         pdfView.backgroundColor = theme.pdfReaderChromeNSColor
+        wireViewportCallbacks(on: pdfView, coordinator: context.coordinator)
         if pdfView.document !== document {
             pdfView.document = document
             context.coordinator.resetScaleApplicationState()
+            context.coordinator.markDocumentChanged()
             if let doc = document {
                 context.coordinator.notifyDocument(doc)
             }
@@ -202,18 +346,64 @@ struct PDFKitReaderView: NSViewRepresentable {
         if pdfView.displayMode != spreadMode {
             pdfView.displayMode = spreadMode
         }
-        context.coordinator.applyScale(pdfView: pdfView, mode: scaleMode, custom: customScale)
+
+        let documentChanged = context.coordinator.consumeDocumentChanged()
+        let scaleTokenChanged = context.coordinator.consumeScaleApplyToken(scaleApplyToken)
+        let forceScaleApply = documentChanged || scaleTokenChanged
+        if forceScaleApply {
+            context.coordinator.invalidateAppliedScaleCache()
+            context.coordinator.markScaleApplyPending()
+        }
         guard let doc = pdfView.document, currentPage >= 1, currentPage <= doc.pageCount,
               let page = doc.page(at: currentPage - 1) else { return }
-        if pdfView.currentPage != page {
+
+        let navigatedToPage = pdfView.currentPage != page
+        if navigatedToPage {
+            if viewportAnchor != nil {
+                pdfView.alphaValue = 0
+            }
             pdfView.go(to: page)
-            context.coordinator.scrollToTop(of: page, on: pdfView)
         }
+
+        if context.coordinator.consumeViewportRestoreToken(viewportRestoreToken), let viewportAnchor {
+            pdfView.alphaValue = 0
+            context.coordinator.scheduleViewportRestore(
+                anchor: viewportAnchor,
+                scrollOrigin: viewportScrollOrigin
+            )
+        }
+
+        context.coordinator.tryApplyPendingScale(
+            pdfView: pdfView,
+            mode: scaleMode,
+            custom: customScale,
+            force: forceScaleApply
+        )
+
+        if navigatedToPage, viewportAnchor == nil {
+            context.coordinator.scrollToTop(of: page, on: pdfView)
+            pdfView.alphaValue = 1
+            context.coordinator.focusReader()
+        } else if viewportAnchor == nil, !context.coordinator.hasPendingViewportRestore {
+            pdfView.alphaValue = 1
+            context.coordinator.focusReader()
+        }
+        context.coordinator.tryRestoreScheduledViewport(on: pdfView, page: page)
     }
 
     static func dismantleNSView(_ nsView: PDFView, coordinator: Coordinator) {
+        coordinator.cancelPendingViewportCapture()
+        coordinator.captureViewportImmediately(from: nsView, persistToDisk: true)
         NotificationCenter.default.removeObserver(coordinator, name: .PDFViewPageChanged, object: nsView)
         NotificationCenter.default.removeObserver(coordinator, name: .PDFViewScaleChanged, object: nsView)
+    }
+
+    private func wireViewportCallbacks(on pdfView: PDFView, coordinator: Coordinator) {
+        guard let stable = pdfView as? StablePDFView else { return }
+        stable.onViewportInteractionEnded = { [weak coordinator, weak pdfView] in
+            guard let coordinator, let pdfView else { return }
+            coordinator.scheduleViewportCapture(from: pdfView)
+        }
     }
 
     final class Coordinator: NSObject {
@@ -221,26 +411,40 @@ struct PDFKitReaderView: NSViewRepresentable {
         var onPageChange: (Int) -> Void
         var onDocumentLoaded: (Int) -> Void
         var onScaleChange: (CGFloat, Bool) -> Void
+        var onViewportCapture: (Int, CGFloat?, CGFloat?, CGFloat, CGFloat?, CGFloat?) -> Void
+        var onPersistViewportSnapshot: (Int, CGFloat, CGFloat, CGFloat, CGFloat?, CGFloat?) -> Void
         var scaleMode: PDFKitViewModel.ScaleMode = .fitHeight
         var customScale: CGFloat = 1.0
-        /// 用于在「适应高度 → 适应宽度」时把滚动位置收到页顶，避免仍停在页中。
         private var lastAppliedScaleMode: PDFKitViewModel.ScaleMode?
         private var lastAppliedScaleFactor: CGFloat?
         private var suppressScaleNotification = false
+        private var documentChangedPending = false
+        private var pendingScaleApply = false
+        private var lastScaleApplyToken: UUID?
+        private var pendingViewportAnchor: CGPoint?
+        private var pendingScrollOrigin: NSPoint?
+        private var lastViewportRestoreToken: UUID?
+        private var viewportCaptureWorkItem: DispatchWorkItem?
 
         init(
             onPageChange: @escaping (Int) -> Void,
             onDocumentLoaded: @escaping (Int) -> Void,
-            onScaleChange: @escaping (CGFloat, Bool) -> Void
+            onScaleChange: @escaping (CGFloat, Bool) -> Void,
+            onViewportCapture: @escaping (Int, CGFloat?, CGFloat?, CGFloat, CGFloat?, CGFloat?) -> Void,
+            onPersistViewportSnapshot: @escaping (Int, CGFloat, CGFloat, CGFloat, CGFloat?, CGFloat?) -> Void
         ) {
             self.onPageChange = onPageChange
             self.onDocumentLoaded = onDocumentLoaded
             self.onScaleChange = onScaleChange
+            self.onViewportCapture = onViewportCapture
+            self.onPersistViewportSnapshot = onPersistViewportSnapshot
         }
 
         func notifyDocument(_ doc: PDFDocument) {
             onDocumentLoaded(doc.pageCount)
-            focusReader()
+            if pendingViewportAnchor == nil {
+                focusReader()
+            }
         }
 
         /// 打开文件后把焦点交给阅读区；页码框已禁止自动 first responder，无需与 TextField 抢焦点。
@@ -262,37 +466,211 @@ struct PDFKitReaderView: NSViewRepresentable {
             if idx != NSNotFound {
                 onPageChange(idx + 1)
             }
+            scheduleViewportCapture(from: pv)
         }
 
         @objc func scaleChanged(_ notification: Notification) {
             guard !suppressScaleNotification, let pv = pdfView else { return }
             onScaleChange(pv.scaleFactor, true)
+            scheduleViewportCapture(from: pv)
         }
 
-        func resetScaleApplicationState() {
+        func markDocumentChanged() {
+            documentChangedPending = true
+        }
+
+        func consumeDocumentChanged() -> Bool {
+            let changed = documentChangedPending
+            documentChangedPending = false
+            return changed
+        }
+
+        func consumeScaleApplyToken(_ token: UUID) -> Bool {
+            guard lastScaleApplyToken != token else { return false }
+            lastScaleApplyToken = token
+            return true
+        }
+
+        func consumeViewportRestoreToken(_ token: UUID) -> Bool {
+            guard lastViewportRestoreToken != token else { return false }
+            lastViewportRestoreToken = token
+            return true
+        }
+
+        var hasPendingViewportRestore: Bool { pendingViewportAnchor != nil }
+
+        func scheduleViewportRestore(anchor: CGPoint?, scrollOrigin: CGPoint?) {
+            pendingViewportAnchor = anchor
+            if let scrollOrigin {
+                pendingScrollOrigin = NSPoint(x: scrollOrigin.x, y: scrollOrigin.y)
+            } else {
+                pendingScrollOrigin = nil
+            }
+        }
+
+        func invalidateAppliedScaleCache() {
             lastAppliedScaleMode = nil
             lastAppliedScaleFactor = nil
         }
 
-        /// 将视口对齐到指定页顶部（与 `currentPage` 一致时才执行，避免误滚）。
-        /// 使用同步布局 + 关闭隐式动画，避免「适应高度 → 适应宽度」时先显示页中再闪回页顶。
-        func scrollToTop(of pinnedPage: PDFPage, on pdfView: PDFView) {
-            guard let current = pdfView.currentPage, current === pinnedPage else { return }
+        func resetScaleApplicationState() {
+            invalidateAppliedScaleCache()
+            pendingScaleApply = false
+            lastScaleApplyToken = nil
+            pendingViewportAnchor = nil
+            pendingScrollOrigin = nil
+        }
+
+        func markScaleApplyPending() {
+            pendingScaleApply = true
+        }
+
+        func tryApplyPendingScale(
+            pdfView: PDFView,
+            mode: PDFKitViewModel.ScaleMode,
+            custom: CGFloat,
+            force: Bool = false
+        ) {
+            guard pendingScaleApply else { return }
+            if applyScale(pdfView: pdfView, mode: mode, custom: custom, force: force) {
+                pendingScaleApply = false
+                if let page = pdfView.currentPage {
+                    tryRestoreScheduledViewport(on: pdfView, page: page)
+                }
+            }
+        }
+
+        func retryPendingScaleApplyIfNeeded() {
+            guard pendingScaleApply, let pdfView else { return }
+            tryApplyPendingScale(
+                pdfView: pdfView,
+                mode: scaleMode,
+                custom: customScale,
+                force: true
+            )
+        }
+
+        func retryPendingViewportRestoreIfNeeded() {
+            guard pendingViewportAnchor != nil, let pdfView, let page = pdfView.currentPage else { return }
+            tryRestoreScheduledViewport(on: pdfView, page: page)
+        }
+
+        func tryRestoreScheduledViewport(on pdfView: PDFView, page: PDFPage) {
+            guard pendingViewportAnchor != nil else { return }
+            guard pdfView.bounds.width > 0, pdfView.bounds.height > 0 else { return }
+            guard !pendingScaleApply else { return }
+            guard pdfView.currentPage === page else { return }
+            guard let anchor = pendingViewportAnchor else { return }
+            let scrollOrigin = pendingScrollOrigin
+            guard PDFViewportScroll.restoreViewport(
+                pagePoint: anchor,
+                scrollOrigin: scrollOrigin,
+                on: page,
+                in: pdfView
+            ) else { return }
+            pendingViewportAnchor = nil
+            pendingScrollOrigin = nil
             CATransaction.begin()
             CATransaction.setDisableActions(true)
+            pdfView.alphaValue = 1
+            CATransaction.commit()
+            focusReader()
+        }
+
+        func cancelPendingViewportCapture() {
+            viewportCaptureWorkItem?.cancel()
+            viewportCaptureWorkItem = nil
+        }
+
+        func scheduleViewportCapture(from pdfView: PDFView) {
+            cancelPendingViewportCapture()
+            let item = DispatchWorkItem { [weak self, weak pdfView] in
+                guard let self, let pdfView else { return }
+                self.captureViewportImmediately(from: pdfView)
+            }
+            viewportCaptureWorkItem = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: item)
+        }
+
+        /// 同步读取视口；回调推到下一轮 RunLoop，避免在 SwiftUI dismantle / 更新周期内修改 @Published 崩溃。
+        func captureViewportImmediately(from pdfView: PDFView, persistToDisk: Bool = false) {
+            guard let page = pdfView.currentPage,
+                  let doc = pdfView.document else { return }
+            let idx = doc.index(for: page)
+            guard idx != NSNotFound,
+                  let pagePoint = PDFViewportScroll.capturePageAnchor(from: pdfView, page: page) else { return }
+            let scrollOrigin = PDFViewportScroll.captureScrollOrigin(from: pdfView)
+
+            if persistToDisk {
+                onPersistViewportSnapshot(
+                    idx + 1,
+                    pagePoint.x,
+                    pagePoint.y,
+                    pdfView.scaleFactor,
+                    scrollOrigin?.x,
+                    scrollOrigin?.y
+                )
+            }
+            deliverViewportCapture(
+                page: idx + 1,
+                anchorX: pagePoint.x,
+                anchorY: pagePoint.y,
+                scale: pdfView.scaleFactor,
+                scrollOriginX: scrollOrigin?.x,
+                scrollOriginY: scrollOrigin?.y
+            )
+        }
+
+        private func deliverViewportCapture(
+            page: Int,
+            anchorX: CGFloat,
+            anchorY: CGFloat,
+            scale: CGFloat,
+            scrollOriginX: CGFloat?,
+            scrollOriginY: CGFloat?
+        ) {
+            let handler = onViewportCapture
+            DispatchQueue.main.async {
+                handler(page, anchorX, anchorY, scale, scrollOriginX, scrollOriginY)
+            }
+        }
+
+        func scrollToTop(of pinnedPage: PDFPage, on pdfView: PDFView) {
+            guard let current = pdfView.currentPage, current === pinnedPage,
+                  let p = PDFViewportScroll.parts(from: pdfView) else { return }
             pdfView.layoutDocumentView()
-            let b = pinnedPage.bounds(for: .mediaBox)
-            let bandH = min(80, max(b.height * 0.2, 24))
-            let topBand = CGRect(x: b.minX, y: b.maxY - bandH, width: b.width, height: bandH)
-            pdfView.go(to: topBand, on: pinnedPage)
+            let pageBounds = pinnedPage.bounds(for: .mediaBox)
+            let bandH = min(80, max(pageBounds.height * 0.2, 24))
+            let topBand = CGRect(x: pageBounds.minX, y: pageBounds.maxY - bandH, width: pageBounds.width, height: bandH)
+            let viewRect = pdfView.convert(topBand, from: pinnedPage)
+            let docRect = p.docView.convert(viewRect, from: pdfView)
+            let visible = p.clip.bounds.size
+            var originX = docRect.midX - visible.width * 0.5
+            let pageRect = PDFViewportScroll.pageRectInDocument(pinnedPage, pdfView: pdfView, parts: p)
+            if pageRect.width <= visible.width + 1 {
+                originX = pageRect.midX - visible.width * 0.5
+            }
+            let origin = p.clip.constrainScroll(NSPoint(x: originX, y: docRect.minY))
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            p.clip.setBoundsOrigin(origin)
+            p.scrollView.reflectScrolledClipView(p.clip)
             CATransaction.commit()
         }
 
-        func applyScale(pdfView: PDFView, mode: PDFKitViewModel.ScaleMode, custom: CGFloat) {
-            guard let page = pdfView.currentPage ?? pdfView.document?.page(at: 0) else { return }
+        @discardableResult
+        func applyScale(
+            pdfView: PDFView,
+            mode: PDFKitViewModel.ScaleMode,
+            custom: CGFloat,
+            force: Bool = false
+        ) -> Bool {
+            guard let page = pdfView.currentPage ?? pdfView.document?.page(at: 0) else { return false }
             let pageRect = page.bounds(for: .mediaBox)
             let viewSize = pdfView.bounds.size
-            guard pageRect.width > 0, pageRect.height > 0, viewSize.width > 0, viewSize.height > 0 else { return }
+            guard pageRect.width > 0, pageRect.height > 0, viewSize.width > 0, viewSize.height > 0 else {
+                return false
+            }
 
             let targetScale: CGFloat
             switch mode {
@@ -301,14 +679,14 @@ struct PDFKitReaderView: NSViewRepresentable {
             case .fitHeight:
                 targetScale = min(max((viewSize.height - 48) / pageRect.height, 0.05), 10)
             case .custom:
-                targetScale = min(max(custom, 0.25), 5.0)
+                targetScale = min(max(custom, 0.05), 10)
             }
 
             if lastAppliedScaleMode == mode,
                let last = lastAppliedScaleFactor,
                abs(last - targetScale) < 0.001,
                abs(pdfView.scaleFactor - targetScale) < 0.001 {
-                return
+                return true
             }
 
             let previousMode = lastAppliedScaleMode
@@ -321,9 +699,14 @@ struct PDFKitReaderView: NSViewRepresentable {
             lastAppliedScaleFactor = targetScale
             onScaleChange(targetScale, false)
 
-            if mode == .fitWidth, previousMode == .fitHeight {
-                scrollToTop(of: page, on: pdfView)
+            if pendingViewportAnchor == nil {
+                if mode == .fitWidth, previousMode == .fitHeight {
+                    scrollToTop(of: page, on: pdfView)
+                } else if mode == .fitHeight, previousMode == .fitWidth {
+                    scrollToTop(of: page, on: pdfView)
+                }
             }
+            return true
         }
     }
 }

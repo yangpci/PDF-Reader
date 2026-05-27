@@ -10,6 +10,7 @@ import UniformTypeIdentifiers
 
 struct ContentView: View {
     @EnvironmentObject private var vm: ReaderViewModel
+    @Environment(\.scenePhase) private var scenePhase
     @State private var shelfHistoryPopoverOpen = false
 
     var body: some View {
@@ -53,6 +54,11 @@ struct ContentView: View {
         }
         .background {
             ReadingArrowKeyHandler(viewModel: vm)
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .inactive || phase == .background {
+                vm.flushPdfReadingSnapshot()
+            }
         }
     }
 
@@ -120,12 +126,11 @@ struct ContentView: View {
                 }
                 .keyboardShortcut("-", modifiers: [.command])
 
-                TextField("", text: $vm.zoomFieldText)
-                    .frame(width: 56)
-                    .textFieldStyle(.roundedBorder)
-                    .multilineTextAlignment(.center)
-                    .onSubmit { vm.applyZoomFieldEditingEnded() }
-                    .onChange(of: vm.zoomFieldText) { _, _ in }
+                PdfZoomPercentField(
+                    text: $vm.zoomFieldText,
+                    onSubmit: { vm.applyZoomFieldEditingEnded() }
+                )
+                .frame(width: 56)
 
                 Button(action: { vm.zoomIn() }) {
                     Image(systemName: "plus.magnifyingglass")
@@ -424,7 +429,11 @@ struct ContentView: View {
                 spreadMode: vm.pdfDisplayMode(),
                 scaleMode: vm.pdfScaleMode,
                 customScale: vm.pdfCustomScale,
+                scaleApplyToken: vm.pdfScaleApplyToken,
                 currentPage: vm.pdfCurrentPage,
+                viewportAnchor: vm.pdfViewportAnchor,
+                viewportScrollOrigin: vm.pdfScrollOrigin,
+                viewportRestoreToken: vm.pdfViewportRestoreToken,
                 onPageChange: { p in
                     vm.pdfCurrentPage = p
                     vm.scheduleSavePdfPosition()
@@ -434,6 +443,26 @@ struct ContentView: View {
                 },
                 onScaleChange: { scale, userInitiated in
                     vm.syncPdfScaleFromReader(scale, userInitiated: userInitiated)
+                },
+                onViewportCapture: { page, anchorX, anchorY, scale, scrollX, scrollY in
+                    vm.capturePdfViewport(
+                        page: page,
+                        anchorX: anchorX,
+                        anchorY: anchorY,
+                        scale: scale,
+                        scrollOriginX: scrollX,
+                        scrollOriginY: scrollY
+                    )
+                },
+                onPersistViewportSnapshot: { page, anchorX, anchorY, scale, scrollX, scrollY in
+                    vm.persistPdfSnapshotDirect(
+                        page: page,
+                        anchorX: anchorX,
+                        anchorY: anchorY,
+                        scale: scale,
+                        scrollOriginX: scrollX,
+                        scrollOriginY: scrollY
+                    )
                 }
             )
             .background(vm.uiTheme.pdfBg)
@@ -755,6 +784,65 @@ private struct ReadingArrowKeyHandler: NSViewRepresentable {
 }
 
 // MARK: - 页码输入（禁止窗口打开时自动成为 first responder，避免焦点闪动）
+
+private struct PdfZoomPercentField: NSViewRepresentable {
+    @Binding var text: String
+    var onSubmit: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text, onSubmit: onSubmit)
+    }
+
+    func makeNSView(context: Context) -> ClickToFocusTextField {
+        let field = ClickToFocusTextField()
+        field.isBezeled = true
+        field.bezelStyle = .roundedBezel
+        field.isEditable = true
+        field.isSelectable = true
+        field.drawsBackground = true
+        field.alignment = .center
+        field.font = .systemFont(ofSize: NSFont.systemFontSize)
+        field.delegate = context.coordinator
+        field.target = context.coordinator
+        field.action = #selector(Coordinator.submit(_:))
+        field.stringValue = text
+        context.coordinator.field = field
+        return field
+    }
+
+    func updateNSView(_ field: ClickToFocusTextField, context: Context) {
+        if field.stringValue != text, field.currentEditor() == nil {
+            field.stringValue = text
+        }
+    }
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        @Binding var text: String
+        var onSubmit: () -> Void
+        weak var field: ClickToFocusTextField?
+
+        init(text: Binding<String>, onSubmit: @escaping () -> Void) {
+            _text = text
+            self.onSubmit = onSubmit
+        }
+
+        @objc func submit(_ sender: Any?) {
+            syncFromField()
+            onSubmit()
+            field?.deactivateFocus()
+            field?.window?.makeFirstResponder(nil)
+        }
+
+        func controlTextDidEndEditing(_ obj: Notification) {
+            syncFromField()
+        }
+
+        private func syncFromField() {
+            guard let raw = field?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return }
+            text = raw.contains("%") ? raw : "\(raw)%"
+        }
+    }
+}
 
 private struct PdfPageNumberField: NSViewRepresentable {
     @Binding var page: Int
