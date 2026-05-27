@@ -17,10 +17,12 @@ private func isImmediateActionGestureRecognizer(_ gr: NSGestureRecognizer) -> Bo
     return gr.isKind(of: cls)
 }
 
-/// 新版 macOS 上部分 PDF 在 `PDFView` 默认「文本选择 / Lookup」路径会触发 CoreGraphics `PageLayout::getWordRange` SIGILL。
+/// 新版 macOS 上部分 PDF 在 PDFKit 默认「文本选择 / Lookup / 右键菜单查词」路径会触发
+/// CoreGraphics `PageLayout::getWordRange` SIGILL。
 /// 1) 拒绝并剥离 `NSImmediateActionGestureRecognizer`（事件仍会经 `_sendMouseEventToGestureRecognizers` 走到
 ///    `-[PDFView immediateActionRecognizerWillPrepare:]`，仅改 mouseDown 不够）。
 /// 2) 左键不再调用 `super.mouseDown`，避免进入 `trackStandardTextSelection`；左键拖动用内容区平移代替。
+/// 3) 覆盖 `menu(for:)`，禁止 PDFKit 默认右键菜单（`rvItemAtPoint` → `selectionFromPoint` 同样会 SIGILL）。
 private final class StablePDFView: PDFView {
     private var isPanning = false
     private var lastMouseInWindow = NSPoint.zero
@@ -52,13 +54,58 @@ private final class StablePDFView: PDFView {
     }
 
     override func mouseDown(with event: NSEvent) {
-        if event.type == .rightMouseDown || event.modifierFlags.contains(.control) {
-            super.mouseDown(with: event)
+        if event.modifierFlags.contains(.control) {
+            showSafeContextMenu(for: event)
             return
         }
         window?.makeFirstResponder(self)
         isPanning = true
         lastMouseInWindow = event.locationInWindow
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        showSafeContextMenu(for: event)
+    }
+
+    /// 不调用 `super.menu(for:)`，避免 PDFKit 在 `menuForEvent:` 里走 `rvItemAtPoint`。
+    override func menu(for event: NSEvent) -> NSMenu? {
+        makeSafeContextMenu()
+    }
+
+    private func showSafeContextMenu(for event: NSEvent) {
+        guard let menu = menu(for: event) else { return }
+        NSMenu.popUpContextMenu(menu, with: event, for: self)
+    }
+
+    private func makeSafeContextMenu() -> NSMenu {
+        let menu = NSMenu()
+        let zoomIn = NSMenuItem(title: "放大", action: #selector(zoomInFromMenu(_:)), keyEquivalent: "+")
+        zoomIn.target = self
+        menu.addItem(zoomIn)
+        let zoomOut = NSMenuItem(title: "缩小", action: #selector(zoomOutFromMenu(_:)), keyEquivalent: "-")
+        zoomOut.target = self
+        menu.addItem(zoomOut)
+        menu.addItem(.separator())
+        let fitWidth = NSMenuItem(title: "适应宽度", action: #selector(fitWidthFromMenu(_:)), keyEquivalent: "")
+        fitWidth.target = self
+        menu.addItem(fitWidth)
+        return menu
+    }
+
+    @objc private func zoomInFromMenu(_ sender: Any?) {
+        scaleFactor = min(scaleFactor * 1.25, 10)
+    }
+
+    @objc private func zoomOutFromMenu(_ sender: Any?) {
+        scaleFactor = max(scaleFactor / 1.25, 0.05)
+    }
+
+    @objc private func fitWidthFromMenu(_ sender: Any?) {
+        guard let page = currentPage ?? document?.page(at: 0) else { return }
+        let pageRect = page.bounds(for: .mediaBox)
+        let viewSize = bounds.size
+        guard pageRect.width > 0, viewSize.width > 0 else { return }
+        scaleFactor = min(max((viewSize.width - 48) / pageRect.width, 0.05), 10)
     }
 
     override func mouseDragged(with event: NSEvent) {
