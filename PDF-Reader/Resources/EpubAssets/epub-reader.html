@@ -58,7 +58,14 @@
           const cfi = loc?.start?.cfi;
           const cur = loc?.start?.displayed?.page;
           const total = loc?.start?.displayed?.total;
-          post({ type: 'location', cfi, page: cur, total: total });
+          post({
+            type: 'location',
+            cfi,
+            page: cur,
+            total: total,
+            spineIndex: loc?.start?.index,
+            href: loc?.start?.href
+          });
         });
 
         const pct = window.__epubFontPercent || 110;
@@ -70,7 +77,9 @@
           type: 'location',
           cfi: loc2?.start?.cfi,
           page: loc2?.start?.displayed?.page,
-          total: loc2?.start?.displayed?.total
+          total: loc2?.start?.displayed?.total,
+          spineIndex: loc2?.start?.index,
+          href: loc2?.start?.href
         });
       } catch (e) {
         post({ type: 'error', message: e && e.message ? e.message : String(e) });
@@ -98,17 +107,62 @@
       mount.innerHTML = '';
     };
 
+    const chapterTitleForSpineIndex = (spineIndex, toc) => {
+      if (spineIndex == null || spineIndex < 0 || !toc?.length) return null;
+      let bestIndex = -1;
+      let bestTitle = null;
+      for (const entry of toc) {
+        const idx = entry.spineIndex ?? -1;
+        if (idx < 0 || idx > spineIndex) continue;
+        if (idx > bestIndex || idx === bestIndex) {
+          bestIndex = idx;
+          bestTitle = entry.title;
+        }
+      }
+      return bestTitle;
+    };
+
+    const chapterTitleForCfi = async (cfi) => {
+      if (!book) return null;
+      try {
+        await book.ready;
+        await book.loaded.navigation;
+        const toc = await getEpubNavToc();
+        if (!toc.length) return null;
+        let spineIndex = -1;
+        if (cfi) {
+          const section = book.spine.get(cfi);
+          if (section != null && section.index != null) spineIndex = section.index;
+        }
+        if (spineIndex < 0 && rendition) {
+          const loc = rendition.currentLocation?.();
+          if (loc?.start?.index != null) spineIndex = loc.start.index;
+        }
+        return chapterTitleForSpineIndex(spineIndex, toc);
+      } catch (e) {
+        return null;
+      }
+    };
+
     window.getEpubNavToc = async () => {
       if (!book) return [];
       try {
         await book.loaded.navigation;
+        await book.ready;
         const root = book.navigation?.toc || [];
         const out = [];
         const walk = (nodes) => {
           for (const n of nodes || []) {
             if (n.label && n.href) {
               const title = String(n.label).replace(/<[^>]*>/gi, '').trim();
-              if (title) out.push({ title, href: n.href });
+              if (title) {
+                let spineIndex = -1;
+                try {
+                  const section = book.spine.get(String(n.href).split('#')[0]);
+                  if (section != null && section.index != null) spineIndex = section.index;
+                } catch (e) {}
+                out.push({ title, href: n.href, spineIndex });
+              }
             }
             if (n.subitems && n.subitems.length) walk(n.subitems);
           }
@@ -121,6 +175,35 @@
     };
 
     window.__epubNavTocJson = async () => JSON.stringify(await getEpubNavToc());
+
+    window.__epubChapterTitleForCfiJson = async (cfi) => {
+      const title = await chapterTitleForCfi(cfi);
+      let spineIndex = -1;
+      if (cfi && book?.spine) {
+        try {
+          const section = book.spine.get(cfi);
+          if (section?.index != null) spineIndex = section.index;
+        } catch (e) {}
+      }
+      return JSON.stringify({ title, spineIndex });
+    };
+
+    window.__epubResolveBookmarksJson = async (cfisJson) => {
+      const cfis = JSON.parse(cfisJson || '[]');
+      const toc = await getEpubNavToc();
+      const out = [];
+      for (const cfi of cfis) {
+        if (!cfi) continue;
+        let spineIndex = -1;
+        try {
+          const section = book?.spine?.get?.(cfi);
+          if (section?.index != null) spineIndex = section.index;
+        } catch (e) {}
+        const title = chapterTitleForSpineIndex(spineIndex, toc);
+        out.push({ cfi, title, spineIndex });
+      }
+      return JSON.stringify(out);
+    };
 
     post({ type: 'jsReady' });
   </script>

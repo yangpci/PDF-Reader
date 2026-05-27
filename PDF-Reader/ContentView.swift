@@ -451,7 +451,11 @@ struct ContentView: View {
                     bookmarkJump: vm.bookmarkJumpToken.flatMap { t in vm.bookmarkJumpCfi.map { (token: t, cfi: $0) } },
                     step: vm.epubStepToken.map { (token: $0, delta: vm.epubStepDelta) },
                     tocPull: vm.epubTocPull,
+                    bookmarkChapterPull: vm.epubBookmarkChapterPull,
+                    bookmarkBatchResolve: vm.epubBookmarkBatchResolve,
                     onTocJSON: { vm.applyEpubTocJSON($0) },
+                    onBookmarkChapterJSON: { vm.applyBookmarkChapterJSON($0) },
+                    onBookmarkBatchJSON: { vm.applyBookmarkBatchJSON($0) },
                     onMessage: { vm.handleEpubBridgeMessage($0) }
                 )
                 .background(vm.uiTheme.pdfBg)
@@ -496,9 +500,9 @@ struct ContentView: View {
                                 .padding(.top, 8)
                         }
                     } else {
-                        ForEach(Array(vm.epubTocEntries.enumerated()), id: \.offset) { _, pair in
-                            Button(pair.0) {
-                                vm.jumpEpubToc(href: pair.1)
+                        ForEach(Array(vm.epubTocEntries.enumerated()), id: \.offset) { _, entry in
+                            Button(entry.title) {
+                                vm.jumpEpubToc(href: entry.href)
                             }
                             .buttonStyle(.plain)
                             .padding(8)
@@ -544,23 +548,7 @@ struct ContentView: View {
                             .padding(.top, 24)
                     } else {
                         ForEach(vm.bookmarks) { b in
-                            VStack(alignment: .leading, spacing: 4) {
-                                Button(b.label) {
-                                    vm.jumpBookmark(b)
-                                }
-                                .buttonStyle(.plain)
-                                .foregroundStyle(vm.uiTheme.text)
-                                Text(b.createdAt)
-                                    .font(.caption2)
-                                    .foregroundStyle(vm.uiTheme.dimText)
-                                Button("删除", role: .destructive) {
-                                    vm.removeBookmark(id: b.id)
-                                }
-                                .font(.caption)
-                            }
-                            .padding(10)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(RoundedRectangle(cornerRadius: 6).fill(vm.uiTheme.primaryBg))
+                            bookmarkRow(b)
                         }
                     }
                 }
@@ -572,6 +560,55 @@ struct ContentView: View {
         .overlay(alignment: .leading) {
             Rectangle().fill(vm.uiTheme.border).frame(width: 1)
         }
+    }
+
+    private func bookmarkRow(_ b: ReaderBookmark) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button {
+                vm.jumpBookmark(b)
+            } label: {
+                HStack(alignment: .top, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(b.label)
+                            .font(.body.weight(.medium))
+                            .foregroundStyle(vm.uiTheme.text)
+                            .multilineTextAlignment(.leading)
+                        VStack(alignment: .leading, spacing: 4) {
+                            if let pageLabel = vm.bookmarkPageLabel(b) {
+                                Label(pageLabel, systemImage: "doc.text")
+                                    .font(.caption)
+                                    .foregroundStyle(vm.uiTheme.dimText)
+                            }
+                            if let outlineLabel = vm.bookmarkOutlineLabel(b) {
+                                Label(outlineLabel, systemImage: "list.bullet")
+                                    .font(.caption)
+                                    .foregroundStyle(vm.uiTheme.dimText)
+                                    .lineLimit(2)
+                            }
+                        }
+                        Text(vm.bookmarkCreatedLabel(b))
+                            .font(.caption2)
+                            .foregroundStyle(vm.uiTheme.dimText.opacity(0.85))
+                    }
+                    Spacer(minLength: 4)
+                    Image(systemName: "arrow.right.circle")
+                        .font(.title3)
+                        .foregroundStyle(vm.uiTheme.accent.opacity(0.9))
+                        .padding(.top, 2)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            Button("删除", role: .destructive) {
+                vm.removeBookmark(id: b.id)
+            }
+            .font(.caption)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 6).fill(vm.uiTheme.primaryBg))
     }
 
     private var statusBar: some View {

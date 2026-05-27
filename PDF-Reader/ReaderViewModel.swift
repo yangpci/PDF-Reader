@@ -55,6 +55,7 @@ final class ReaderViewModel: ObservableObject {
     @Published var epubDisplayedPage: Int?
     @Published var epubDisplayedTotal: Int?
     @Published var currentEpubCfi: String?
+    @Published var currentEpubSpineIndex: Int?
 
     @Published var zoomFieldText: String = "100%"
 
@@ -72,8 +73,10 @@ final class ReaderViewModel: ObservableObject {
     @Published var bookmarkJumpToken: UUID?
     @Published var bookmarkJumpCfi: String?
 
-    @Published var epubTocEntries: [(title: String, href: String)] = []
+    @Published var epubTocEntries: [EpubTocEntry] = []
     @Published var epubTocPull: UUID?
+    @Published var epubBookmarkChapterPull: (token: UUID, cfi: String)?
+    @Published var epubBookmarkBatchResolve: (token: UUID, cfis: [String])?
     @Published var epubStepToken: UUID?
     @Published var epubStepDelta: Int = 0
 
@@ -82,6 +85,14 @@ final class ReaderViewModel: ObservableObject {
     private var persistence: AppPersistenceData
     private var coverCache: [String: NSImage] = [:]
     private var savePositionTask: Task<Void, Never>?
+    private struct PendingBookmark {
+        var label: String
+        var path: String
+        var cfi: String
+        var page: Int?
+        var spineIndex: Int?
+    }
+    private var pendingBookmark: PendingBookmark?
 
     var isBookmarkedHere: Bool {
         guard let path = currentFilePath else { return false }
@@ -216,6 +227,7 @@ final class ReaderViewModel: ObservableObject {
         epubSession = EpubLoadSession(id: UUID(), data: data, startCfi: saved)
         bookmarks = persistence.bookmarks[key] ?? []
         currentEpubCfi = saved
+        currentEpubSpineIndex = nil
         epubFontPercent = 110
         updateZoomField()
         epubTocEntries = []
@@ -367,6 +379,10 @@ final class ReaderViewModel: ObservableObject {
 
     func toggleBookmarks() {
         showingBookmarks.toggle()
+        if showingBookmarks, mode == .epub {
+            epubTocPull = UUID()
+            resolveEpubBookmarkTitlesIfNeeded()
+        }
     }
 
     func goPdfPage(_ page: Int) {
@@ -502,7 +518,7 @@ final class ReaderViewModel: ObservableObject {
 
     func beginAddBookmark() {
         if mode == .epub {
-            bookmarkPromptDefault = "阅读位置"
+            bookmarkPromptDefault = currentEpubChapterTitle() ?? "阅读位置"
         } else {
             bookmarkPromptDefault = "第 \(pdfCurrentPage) 页"
         }
@@ -516,9 +532,22 @@ final class ReaderViewModel: ObservableObject {
             showingBookmarkPrompt = false
             return
         }
-        if mode == .epub && (currentEpubCfi == nil || currentEpubCfi!.isEmpty) {
-            setStatus("当前 EPUB 位置不可用")
+        if mode == .epub {
+            guard let cfi = currentEpubCfi, !cfi.isEmpty else {
+                setStatus("当前 EPUB 位置不可用")
+                showingBookmarkPrompt = false
+                return
+            }
+            let label = bookmarkDraftLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? bookmarkPromptDefault : bookmarkDraftLabel
+            pendingBookmark = PendingBookmark(
+                label: label,
+                path: path,
+                cfi: cfi,
+                page: epubDisplayedPage,
+                spineIndex: currentEpubSpineIndex
+            )
             showingBookmarkPrompt = false
+            epubBookmarkChapterPull = (UUID(), cfi)
             return
         }
         let label = bookmarkDraftLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? bookmarkPromptDefault : bookmarkDraftLabel
@@ -527,8 +556,10 @@ final class ReaderViewModel: ObservableObject {
             id: String(Int(Date().timeIntervalSince1970 * 1000)),
             label: label,
             createdAt: ISO8601DateFormatter().string(from: Date()),
-            page: mode == .pdf ? pdfCurrentPage : nil,
-            cfi: mode == .epub ? currentEpubCfi : nil
+            page: pdfCurrentPage,
+            cfi: nil,
+            outlineTitle: PDFOutlineFlat.title(forPage: pdfCurrentPage, in: pdfOutline),
+            epubSpineIndex: nil
         )
         if persistence.bookmarks[k] == nil { persistence.bookmarks[k] = [] }
         persistence.bookmarks[k]!.append(row)
@@ -537,6 +568,29 @@ final class ReaderViewModel: ObservableObject {
         showingBookmarkPrompt = false
         showingBookmarks = true
         setStatus("已添加书签: \(label)")
+    }
+
+    private func finalizePendingBookmark(outlineTitle: String?, spineIndex: Int?) {
+        guard let pending = pendingBookmark else { return }
+        pendingBookmark = nil
+        let k = normalizePath(pending.path)
+        let resolvedTitle = outlineTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedSpine = spineIndex ?? pending.spineIndex
+        let row = ReaderBookmark(
+            id: String(Int(Date().timeIntervalSince1970 * 1000)),
+            label: pending.label,
+            createdAt: ISO8601DateFormatter().string(from: Date()),
+            page: pending.page,
+            cfi: pending.cfi,
+            outlineTitle: (resolvedTitle?.isEmpty == false) ? resolvedTitle : epubChapterTitle(forSpineIndex: resolvedSpine),
+            epubSpineIndex: resolvedSpine
+        )
+        if persistence.bookmarks[k] == nil { persistence.bookmarks[k] = [] }
+        persistence.bookmarks[k]!.append(row)
+        bookmarks = persistence.bookmarks[k] ?? []
+        persist()
+        showingBookmarks = true
+        setStatus("已添加书签: \(pending.label)")
     }
 
     func removeBookmark(id: String) {
@@ -562,18 +616,52 @@ final class ReaderViewModel: ObservableObject {
         if let cfi = b.cfi {
             bookmarkJumpToken = UUID()
             bookmarkJumpCfi = cfi
+            setStatus("已跳转到书签：\(b.label)")
         } else if let p = b.page {
             goPdfPage(p)
+            setStatus("已跳转到第 \(p) 页")
+        } else {
+            setStatus("该书签缺少位置信息")
+            return
         }
         showingBookmarks = false
     }
 
+    func bookmarkPageLabel(_ b: ReaderBookmark) -> String? {
+        b.page.map { "第 \($0) 页" }
+    }
+
+    func bookmarkOutlineLabel(_ b: ReaderBookmark) -> String? {
+        if let title = b.outlineTitle?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty {
+            return title
+        }
+        if mode == .pdf, let p = b.page {
+            return PDFOutlineFlat.title(forPage: p, in: pdfOutline)
+        }
+        if mode == .epub, let idx = b.epubSpineIndex {
+            return epubChapterTitle(forSpineIndex: idx)
+        }
+        return nil
+    }
+
+    func bookmarkCreatedLabel(_ b: ReaderBookmark) -> String {
+        let f = ISO8601DateFormatter()
+        guard let date = f.date(from: b.createdAt) else { return b.createdAt }
+        let display = DateFormatter()
+        display.dateStyle = .short
+        display.timeStyle = .short
+        return display.string(from: date)
+    }
+
     func handleEpubBridgeMessage(_ msg: EpubWebReaderView.EpubBridgeMessage) {
         switch msg {
-        case .location(let cfi, let page, let total):
+        case .location(let cfi, let page, let total, let spineIndex, _):
             if let cfi { saveEpubPosition(cfi: cfi) }
             epubDisplayedPage = page
             epubDisplayedTotal = total
+            if let spineIndex { currentEpubSpineIndex = spineIndex }
+        case .ready:
+            epubTocPull = UUID()
         case .error(let s):
             setStatus("EPUB: \(s)")
         case .status(let s):
@@ -584,12 +672,81 @@ final class ReaderViewModel: ObservableObject {
     }
 
     func applyEpubTocJSON(_ json: String) {
-        struct Row: Codable { let title: String; let href: String }
+        struct Row: Codable { let title: String; let href: String; let spineIndex: Int? }
         guard let d = json.data(using: .utf8),
               let rows = try? JSONDecoder().decode([Row].self, from: d) else {
             epubTocEntries = []
             return
         }
-        epubTocEntries = rows.map { ($0.title, $0.href) }
+        epubTocEntries = rows.map { EpubTocEntry(title: $0.title, href: $0.href, spineIndex: $0.spineIndex ?? -1) }
+    }
+
+    func applyBookmarkChapterJSON(_ json: String) {
+        struct Row: Codable { let title: String?; let spineIndex: Int? }
+        let row = json.data(using: .utf8).flatMap { try? JSONDecoder().decode(Row.self, from: $0) }
+        finalizePendingBookmark(outlineTitle: row?.title, spineIndex: row?.spineIndex)
+    }
+
+    func applyBookmarkBatchJSON(_ json: String) {
+        struct Row: Codable { let cfi: String; let title: String?; let spineIndex: Int? }
+        guard let path = currentFilePath,
+              let d = json.data(using: .utf8),
+              let rows = try? JSONDecoder().decode([Row].self, from: d),
+              !rows.isEmpty else { return }
+        let k = normalizePath(path)
+        var list = persistence.bookmarks[k] ?? []
+        var changed = false
+        for row in rows {
+            guard let idx = list.firstIndex(where: { $0.cfi == row.cfi }) else { continue }
+            var item = list[idx]
+            var itemChanged = false
+            if (item.outlineTitle == nil || item.outlineTitle!.isEmpty),
+               let title = row.title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty {
+                item.outlineTitle = title
+                itemChanged = true
+            }
+            if item.epubSpineIndex == nil, let spine = row.spineIndex, spine >= 0 {
+                item.epubSpineIndex = spine
+                itemChanged = true
+            }
+            if itemChanged {
+                list[idx] = item
+                changed = true
+            }
+        }
+        guard changed else { return }
+        persistence.bookmarks[k] = list
+        bookmarks = list
+        persist()
+    }
+
+    func epubChapterTitle(forSpineIndex index: Int?) -> String? {
+        guard let index, index >= 0, !epubTocEntries.isEmpty else { return nil }
+        var bestIndex = -1
+        var bestTitle: String?
+        for entry in epubTocEntries {
+            guard entry.spineIndex >= 0, entry.spineIndex <= index else { continue }
+            if entry.spineIndex > bestIndex || entry.spineIndex == bestIndex {
+                bestIndex = entry.spineIndex
+                bestTitle = entry.title
+            }
+        }
+        return bestTitle
+    }
+
+    func currentEpubChapterTitle() -> String? {
+        epubChapterTitle(forSpineIndex: currentEpubSpineIndex)
+    }
+
+    private func resolveEpubBookmarkTitlesIfNeeded() {
+        guard mode == .epub else { return }
+        let cfis = bookmarks.compactMap { b -> String? in
+            guard b.cfi != nil else { return nil }
+            let hasTitle = b.outlineTitle?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            let needsSpine = b.epubSpineIndex == nil
+            return (!hasTitle || needsSpine) ? b.cfi : nil
+        }
+        guard !cfis.isEmpty else { return }
+        epubBookmarkBatchResolve = (UUID(), cfis)
     }
 }

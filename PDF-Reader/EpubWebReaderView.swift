@@ -13,6 +13,12 @@ struct EpubLoadSession {
     var startCfi: String?
 }
 
+struct EpubTocEntry: Hashable {
+    let title: String
+    let href: String
+    let spineIndex: Int
+}
+
 struct EpubWebReaderView: NSViewRepresentable {
     var session: EpubLoadSession
     var theme: AppTheme
@@ -21,13 +27,17 @@ struct EpubWebReaderView: NSViewRepresentable {
     var bookmarkJump: (token: UUID, cfi: String)?
     var step: (token: UUID, delta: Int)?
     var tocPull: UUID?
+    var bookmarkChapterPull: (token: UUID, cfi: String)?
+    var bookmarkBatchResolve: (token: UUID, cfis: [String])?
     var onTocJSON: (String) -> Void
+    var onBookmarkChapterJSON: (String) -> Void
+    var onBookmarkBatchJSON: (String) -> Void
     var onMessage: (EpubBridgeMessage) -> Void
 
     enum EpubBridgeMessage: Equatable {
         case jsReady
         case ready
-        case location(cfi: String?, page: Int?, total: Int?)
+        case location(cfi: String?, page: Int?, total: Int?, spineIndex: Int?, href: String?)
         case error(String)
         case status(String)
     }
@@ -58,6 +68,8 @@ struct EpubWebReaderView: NSViewRepresentable {
     func updateNSView(_ webView: WKWebView, context: Context) {
         context.coordinator.onMessage = onMessage
         context.coordinator.onTocJSON = onTocJSON
+        context.coordinator.onBookmarkChapterJSON = onBookmarkChapterJSON
+        context.coordinator.onBookmarkBatchJSON = onBookmarkBatchJSON
         context.coordinator.readerTheme = theme
         context.coordinator.syncReaderChromeIfNeeded(webView: webView)
         if context.coordinator.lastSessionId != session.id {
@@ -83,12 +95,22 @@ struct EpubWebReaderView: NSViewRepresentable {
             context.coordinator.lastTocPull = t
             context.coordinator.pullToc(webView: webView)
         }
+        if let pull = bookmarkChapterPull, pull.token != context.coordinator.lastBookmarkChapterToken {
+            context.coordinator.lastBookmarkChapterToken = pull.token
+            context.coordinator.pullBookmarkChapter(webView: webView, cfi: pull.cfi)
+        }
+        if let batch = bookmarkBatchResolve, batch.token != context.coordinator.lastBookmarkBatchToken {
+            context.coordinator.lastBookmarkBatchToken = batch.token
+            context.coordinator.resolveBookmarkBatch(webView: webView, cfis: batch.cfis)
+        }
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
         weak var webView: WKWebView?
         var onMessage: (EpubBridgeMessage) -> Void
         var onTocJSON: (String) -> Void = { _ in }
+        var onBookmarkChapterJSON: (String) -> Void = { _ in }
+        var onBookmarkBatchJSON: (String) -> Void = { _ in }
         var readerTheme: AppTheme = .midnight
         var lastAppliedReaderChromeHex: String?
         var lastSessionId: UUID?
@@ -96,6 +118,8 @@ struct EpubWebReaderView: NSViewRepresentable {
         var lastTocToken: UUID?
         var lastBookmarkToken: UUID?
         var lastTocPull: UUID?
+        var lastBookmarkChapterToken: UUID?
+        var lastBookmarkBatchToken: UUID?
         var lastStepToken: UUID?
         let epubSchemeHandler = EpubRuntimeSchemeHandler()
         private var pendingStartCfi: String?
@@ -123,6 +147,20 @@ struct EpubWebReaderView: NSViewRepresentable {
             }
         }
 
+        private func deliverBookmarkChapterJSON(_ json: String) {
+            let handler = onBookmarkChapterJSON
+            DispatchQueue.main.async {
+                handler(json)
+            }
+        }
+
+        private func deliverBookmarkBatchJSON(_ json: String) {
+            let handler = onBookmarkBatchJSON
+            DispatchQueue.main.async {
+                handler(json)
+            }
+        }
+
         func syncReaderChromeIfNeeded(webView: WKWebView) {
             let hex = readerTheme.pdfReaderChromeHex
             guard lastAppliedReaderChromeHex != hex else { return }
@@ -142,6 +180,50 @@ struct EpubWebReaderView: NSViewRepresentable {
                     case .failure:
                         break
                     }
+                }
+            }
+        }
+
+        func pullBookmarkChapter(webView: WKWebView, cfi: String) {
+            if #available(macOS 11.0, *) {
+                webView.callAsyncJavaScript(
+                    "return await __epubChapterTitleForCfiJson(cfi);",
+                    arguments: ["cfi": cfi],
+                    in: nil,
+                    in: .page
+                ) { result in
+                    switch result {
+                    case .success(let any):
+                        if let s = any as? String {
+                            self.deliverBookmarkChapterJSON(s)
+                        }
+                    case .failure:
+                        self.deliverBookmarkChapterJSON("{}")
+                    }
+                }
+            }
+        }
+
+        func resolveBookmarkBatch(webView: WKWebView, cfis: [String]) {
+            guard #available(macOS 11.0, *),
+                  let data = try? JSONEncoder().encode(cfis),
+                  let cfisJson = String(data: data, encoding: .utf8) else {
+                deliverBookmarkBatchJSON("[]")
+                return
+            }
+            webView.callAsyncJavaScript(
+                "return await __epubResolveBookmarksJson(cfisJson);",
+                arguments: ["cfisJson": cfisJson],
+                in: nil,
+                in: .page
+            ) { result in
+                switch result {
+                case .success(let any):
+                    if let s = any as? String {
+                        self.deliverBookmarkBatchJSON(s)
+                    }
+                case .failure:
+                    self.deliverBookmarkBatchJSON("[]")
                 }
             }
         }
@@ -245,7 +327,9 @@ struct EpubWebReaderView: NSViewRepresentable {
                 let cfi = body["cfi"] as? String
                 let page = body["page"] as? Int
                 let total = body["total"] as? Int
-                deliverBridge(.location(cfi: cfi, page: page, total: total))
+                let spineIndex = body["spineIndex"] as? Int
+                let href = body["href"] as? String
+                deliverBridge(.location(cfi: cfi, page: page, total: total, spineIndex: spineIndex, href: href))
             case "error":
                 deliverBridge(.error((body["message"] as? String) ?? "未知错误"))
             case "status":

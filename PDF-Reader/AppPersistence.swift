@@ -11,6 +11,10 @@ struct ReaderBookmark: Codable, Identifiable, Hashable {
     var createdAt: String
     var page: Int?
     var cfi: String?
+    /// PDF 大纲 / EPUB 目录章节标题（旧数据可为 nil，展示时回填）
+    var outlineTitle: String?
+    /// EPUB 书脊索引，用于在无 outlineTitle 时匹配目录章节
+    var epubSpineIndex: Int?
 }
 
 struct AppPersistenceData: Codable {
@@ -72,11 +76,19 @@ enum AppPersistence {
         let url = storageURL
         guard let data = try? Data(contentsOf: url) else { return AppPersistenceData() }
         let decoder = JSONDecoder()
-        do {
-            return try decoder.decode(AppPersistenceData.self, from: data)
-        } catch {
+        if let loaded = try? decoder.decode(AppPersistenceData.self, from: data) {
+            return loaded
+        }
+        // 兼容被实验性字段污染的 JSON（如 pdfReadingSnapshots）
+        guard var root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return AppPersistenceData()
         }
+        root.removeValue(forKey: "pdfReadingSnapshots")
+        guard let cleaned = try? JSONSerialization.data(withJSONObject: root),
+              let recovered = try? decoder.decode(AppPersistenceData.self, from: cleaned) else {
+            return AppPersistenceData()
+        }
+        return recovered
     }
 
     static func save(_ data: AppPersistenceData) {

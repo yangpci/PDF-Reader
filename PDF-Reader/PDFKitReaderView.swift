@@ -370,4 +370,9 @@ enum PDFOutlineFlat {
         walk(outline)
         return rows
     }
+
+    /// 返回不超过 `page` 的最近一级大纲标题（用于书签所在目录）。
+    static func title(forPage page: Int, in outline: [PDFOutlineEntry]) -> String? {
+        outline.filter { $0.page <= page }.max(by: { $0.page < $1.page })?.title
+    }
 }
