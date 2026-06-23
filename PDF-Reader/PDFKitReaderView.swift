@@ -106,6 +106,35 @@ private enum PDFViewportScroll {
         let inView = pdfView.convert(pageBounds, from: page)
         return parts.docView.convert(inView, from: pdfView)
     }
+
+    /// 当前页在视口内是否还有可滚动的余量（避免整页适配高度时误拦截 PDFKit 翻页）。
+    static func hasScrollableOverflow(in pdfView: PDFView) -> Bool {
+        guard let p = parts(from: pdfView) else { return false }
+        pdfView.layoutDocumentView()
+        let docSize = p.docView.frame.size
+        let visible = p.clip.bounds.size
+        return docSize.height > visible.height + 2 || docSize.width > visible.width + 2
+    }
+
+    /// 将滚轮增量施加到 clip，返回未能消费的溢出量（用于边界累积翻页）。
+    static func applyScrollDelta(
+        deltaX: CGFloat,
+        deltaY: CGFloat,
+        in pdfView: PDFView
+    ) -> (overflowX: CGFloat, overflowY: CGFloat) {
+        guard let p = parts(from: pdfView) else { return (0, 0) }
+        pdfView.layoutDocumentView()
+        var origin = p.clip.bounds.origin
+        origin.x += deltaX
+        origin.y += deltaY
+        let constrained = p.clip.constrainScroll(origin)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        p.clip.setBoundsOrigin(constrained)
+        p.scrollView.reflectScrolledClipView(p.clip)
+        CATransaction.commit()
+        return (origin.x - constrained.x, origin.y - constrained.y)
+    }
 }
 
 /// 新版 macOS 上部分 PDF 在 PDFKit 默认「文本选择 / Lookup / 右键菜单查词」路径会触发
@@ -117,6 +146,23 @@ private enum PDFViewportScroll {
 private final class StablePDFView: PDFView {
     private var isPanning = false
     private var lastMouseInWindow = NSPoint.zero
+    /// 在页顶/页底继续滚动时累积溢出，超过阈值才翻页，减轻触控板惯性误翻。
+    private var pageTurnScrollAccumulator: CGFloat = 0
+    private var pageTurnScrollAxis: PageTurnScrollAxis?
+    /// 本次滚动手势的主导方向；上下滚动时忽略横向溢出，避免误触发左右翻页。
+    private var scrollGestureDominantAxis: PageTurnScrollAxis?
+    private var scrollGestureTotalDeltaX: CGFloat = 0
+    private var scrollGestureTotalDeltaY: CGFloat = 0
+    private static let pageTurnScrollThreshold: CGFloat = 96
+    /// 横向翻页阈值更高，且需明显强于纵向分量。
+    private static let horizontalPageTurnScrollThreshold: CGFloat = 144
+    private static let horizontalDominanceRatio: CGFloat = 1.8
+
+    private enum PageTurnScrollAxis {
+        case vertical
+        case horizontal
+    }
+
     var onBoundsReadyForScale: (() -> Void)?
     var onViewportInteractionEnded: (() -> Void)?
 
@@ -229,8 +275,152 @@ private final class StablePDFView: PDFView {
     }
 
     override func scrollWheel(with event: NSEvent) {
-        super.scrollWheel(with: event)
+        if event.phase.contains(.began) {
+            resetScrollGestureState()
+        }
+
+        guard PDFViewportScroll.hasScrollableOverflow(in: self) else {
+            resetScrollGestureState()
+            super.scrollWheel(with: event)
+            onViewportInteractionEnded?()
+            return
+        }
+
+        let multiplier: CGFloat = event.hasPreciseScrollingDeltas ? 1 : 16
+        let deltaX = event.scrollingDeltaX * multiplier
+        let deltaY = event.scrollingDeltaY * multiplier
+
+        if abs(deltaX) < 0.01, abs(deltaY) < 0.01 {
+            if event.phase.contains(.ended) || event.phase.contains(.cancelled) {
+                resetScrollGestureState()
+            }
+            return
+        }
+
+        updateScrollGestureDominantAxis(deltaX: deltaX, deltaY: deltaY)
+
+        let overflow = PDFViewportScroll.applyScrollDelta(deltaX: deltaX, deltaY: deltaY, in: self)
+
+        if abs(overflow.overflowY) >= 0.5 {
+            if tryTurnPageForVerticalOverflow(overflow.overflowY) {
+                onViewportInteractionEnded?()
+                return
+            }
+        } else if abs(overflow.overflowX) >= 0.5, shouldAllowHorizontalPageTurn(for: overflow) {
+            if tryTurnPageForHorizontalOverflow(overflow.overflowX) {
+                onViewportInteractionEnded?()
+                return
+            }
+        } else {
+            resetPageTurnScrollAccumulator()
+        }
+
+        if event.phase.contains(.ended) || event.phase.contains(.cancelled) {
+            resetScrollGestureState()
+        }
+
         onViewportInteractionEnded?()
+    }
+
+    private func resetPageTurnScrollAccumulator() {
+        pageTurnScrollAccumulator = 0
+        pageTurnScrollAxis = nil
+    }
+
+    private func resetScrollGestureState() {
+        resetPageTurnScrollAccumulator()
+        scrollGestureDominantAxis = nil
+        scrollGestureTotalDeltaX = 0
+        scrollGestureTotalDeltaY = 0
+    }
+
+    private func updateScrollGestureDominantAxis(deltaX: CGFloat, deltaY: CGFloat) {
+        scrollGestureTotalDeltaX += abs(deltaX)
+        scrollGestureTotalDeltaY += abs(deltaY)
+
+        let totalX = scrollGestureTotalDeltaX
+        let totalY = scrollGestureTotalDeltaY
+        guard totalX >= 8 || totalY >= 8 else { return }
+
+        if totalY >= totalX * Self.horizontalDominanceRatio {
+            scrollGestureDominantAxis = .vertical
+        } else if totalX >= totalY * Self.horizontalDominanceRatio {
+            scrollGestureDominantAxis = .horizontal
+        }
+    }
+
+    /// 上下滚动时页面宽度常已适配视口，横向 delta 无法被消费；仅在明确横向手势时才允许左右翻页。
+    private func shouldAllowHorizontalPageTurn(for overflow: (overflowX: CGFloat, overflowY: CGFloat)) -> Bool {
+        if scrollGestureDominantAxis == .vertical { return false }
+
+        let absX = abs(overflow.overflowX)
+        let absY = abs(overflow.overflowY)
+        if absY >= 0.5, absX < absY * Self.horizontalDominanceRatio { return false }
+
+        if scrollGestureDominantAxis == nil {
+            let totalX = scrollGestureTotalDeltaX
+            let totalY = scrollGestureTotalDeltaY
+            if totalY > totalX { return false }
+            if totalX < Self.horizontalPageTurnScrollThreshold * 0.35 { return false }
+        }
+
+        return true
+    }
+
+    private func tryTurnPageForVerticalOverflow(_ overflowY: CGFloat) -> Bool {
+        accumulatePageTurnOverflow(
+            overflowY,
+            axis: .vertical,
+            threshold: Self.pageTurnScrollThreshold
+        )
+    }
+
+    private func tryTurnPageForHorizontalOverflow(_ overflowX: CGFloat) -> Bool {
+        accumulatePageTurnOverflow(
+            overflowX,
+            axis: .horizontal,
+            threshold: Self.horizontalPageTurnScrollThreshold
+        )
+    }
+
+    private func accumulatePageTurnOverflow(
+        _ overflow: CGFloat,
+        axis: PageTurnScrollAxis,
+        threshold: CGFloat
+    ) -> Bool {
+        guard overflow != 0 else {
+            resetPageTurnScrollAccumulator()
+            return false
+        }
+        if pageTurnScrollAxis != axis {
+            pageTurnScrollAxis = axis
+            pageTurnScrollAccumulator = 0
+        }
+        if pageTurnScrollAccumulator != 0,
+           (pageTurnScrollAccumulator > 0) != (overflow > 0) {
+            pageTurnScrollAccumulator = overflow
+        } else {
+            pageTurnScrollAccumulator += overflow
+        }
+
+        guard abs(pageTurnScrollAccumulator) >= threshold else { return false }
+
+        let towardNext = pageTurnScrollAccumulator < 0
+        resetPageTurnScrollAccumulator()
+        return turnPage(towardNext: towardNext)
+    }
+
+    @discardableResult
+    private func turnPage(towardNext: Bool) -> Bool {
+        guard let doc = document, let page = currentPage else { return false }
+        let idx = doc.index(for: page)
+        guard idx != NSNotFound else { return false }
+        let target = towardNext ? idx + 1 : idx - 1
+        guard target >= 0, target < doc.pageCount, let targetPage = doc.page(at: target) else {
+            return false
+        }
+        go(to: targetPage)
+        return true
     }
 
     override func magnify(with event: NSEvent) {
