@@ -31,11 +31,8 @@ struct ContentView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                if vm.showingToc {
-                    tocSidebar
-                }
-                if vm.showingBookmarks {
-                    bookmarkSidebar
+                if vm.activeSidebar != nil {
+                    readerSidebar
                 }
             }
             statusBar
@@ -155,6 +152,7 @@ struct ContentView: View {
                     Label("目录", systemImage: "list.bullet")
                 }
                 .keyboardShortcut("t", modifiers: [.command, .shift])
+                .help(vm.activeSidebar == .toc ? "关闭目录侧栏" : "打开目录侧栏")
 
                 Button(action: { vm.beginAddBookmark() }) {
                     Image(systemName: "bookmark")
@@ -165,6 +163,7 @@ struct ContentView: View {
                     Label("书签", systemImage: "bookmark.square")
                 }
                 .keyboardShortcut("b", modifiers: [.command, .shift])
+                .help(vm.activeSidebar == .bookmarks ? "关闭书签侧栏" : "打开书签侧栏")
             }
 
             Spacer(minLength: 8)
@@ -494,59 +493,33 @@ struct ContentView: View {
         }
     }
 
-    private var tocSidebar: some View {
+    private var readerSidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text(vm.mode == .epub ? "EPUB 目录" : "PDF 大纲目录")
-                    .font(.headline)
-                    .foregroundStyle(vm.uiTheme.text)
+            HStack(spacing: 10) {
+                Picker("侧栏", selection: Binding(
+                    get: { vm.activeSidebar ?? .toc },
+                    set: { vm.showSidebar($0) }
+                )) {
+                    Text("目录").tag(ReaderViewModel.ReaderSidebarTab.toc)
+                    Text("书签").tag(ReaderViewModel.ReaderSidebarTab.bookmarks)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+
                 Spacer()
-                Button("关闭") { vm.showingToc = false }
+
+                Button("关闭") { vm.activeSidebar = nil }
             }
             .padding(12)
             .background(vm.uiTheme.secondaryBg)
 
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 6) {
-                    if vm.mode == .pdf {
-                        ForEach(vm.pdfOutline) { row in
-                            Button {
-                                vm.jumpOutline(row)
-                            } label: {
-                                HStack {
-                                    Text(row.title).foregroundStyle(vm.uiTheme.text)
-                                    Spacer()
-                                    Text("\(row.page)").foregroundStyle(vm.uiTheme.dimText).font(.caption.monospacedDigit())
-                                }
-                                .padding(8)
-                                .background(RoundedRectangle(cornerRadius: 6).fill(vm.uiTheme.primaryBg))
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        if vm.pdfOutline.isEmpty {
-                            Text("该 PDF 未提供大纲结构")
-                                .foregroundStyle(vm.uiTheme.dimText)
-                                .padding(.top, 8)
-                        }
-                    } else {
-                        ForEach(Array(vm.epubTocEntries.enumerated()), id: \.offset) { _, entry in
-                            Button(entry.title) {
-                                vm.jumpEpubToc(href: entry.href)
-                            }
-                            .buttonStyle(.plain)
-                            .padding(8)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(RoundedRectangle(cornerRadius: 6).fill(vm.uiTheme.primaryBg))
-                            .foregroundStyle(vm.uiTheme.text)
-                        }
-                        if vm.epubTocEntries.isEmpty {
-                            Text("正在加载目录或本书无导航…")
-                                .foregroundStyle(vm.uiTheme.dimText)
-                                .padding(.top, 8)
-                        }
-                    }
+            Group {
+                switch vm.activeSidebar ?? .toc {
+                case .toc:
+                    tocSidebarContent
+                case .bookmarks:
+                    bookmarkSidebarContent
                 }
-                .padding(10)
             }
         }
         .frame(width: 300)
@@ -556,38 +529,66 @@ struct ContentView: View {
         }
     }
 
-    private var bookmarkSidebar: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("我的书签")
-                    .font(.headline)
-                    .foregroundStyle(vm.uiTheme.text)
-                Spacer()
-                Button("关闭") { vm.showingBookmarks = false }
-            }
-            .padding(12)
-            .background(vm.uiTheme.secondaryBg)
-
-            ScrollView {
-                LazyVStack(spacing: 8) {
-                    if vm.bookmarks.isEmpty {
-                        Text("尚无书签\n可使用 ⌘D 添加")
-                            .foregroundStyle(vm.uiTheme.dimText)
-                            .multilineTextAlignment(.center)
-                            .padding(.top, 24)
-                    } else {
-                        ForEach(vm.bookmarks) { b in
-                            bookmarkRow(b)
+    private var tocSidebarContent: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 6) {
+                if vm.mode == .pdf {
+                    ForEach(vm.pdfOutline) { row in
+                        Button {
+                            vm.jumpOutline(row)
+                        } label: {
+                            HStack {
+                                Text(row.title).foregroundStyle(vm.uiTheme.text)
+                                Spacer()
+                                Text("\(row.page)").foregroundStyle(vm.uiTheme.dimText).font(.caption.monospacedDigit())
+                            }
+                            .padding(8)
+                            .background(RoundedRectangle(cornerRadius: 6).fill(vm.uiTheme.primaryBg))
                         }
+                        .buttonStyle(.plain)
+                    }
+                    if vm.pdfOutline.isEmpty {
+                        Text("该 PDF 未提供大纲结构")
+                            .foregroundStyle(vm.uiTheme.dimText)
+                            .padding(.top, 8)
+                    }
+                } else {
+                    ForEach(Array(vm.epubTocEntries.enumerated()), id: \.offset) { _, entry in
+                        Button(entry.title) {
+                            vm.jumpEpubToc(href: entry.href)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(vm.uiTheme.primaryBg))
+                        .foregroundStyle(vm.uiTheme.text)
+                    }
+                    if vm.epubTocEntries.isEmpty {
+                        Text("正在加载目录或本书无导航…")
+                            .foregroundStyle(vm.uiTheme.dimText)
+                            .padding(.top, 8)
                     }
                 }
-                .padding(10)
             }
+            .padding(10)
         }
-        .frame(width: 280)
-        .background(vm.uiTheme.secondaryBg)
-        .overlay(alignment: .leading) {
-            Rectangle().fill(vm.uiTheme.border).frame(width: 1)
+    }
+
+    private var bookmarkSidebarContent: some View {
+        ScrollView {
+            LazyVStack(spacing: 8) {
+                if vm.bookmarks.isEmpty {
+                    Text("尚无书签\n可使用 ⌘D 添加")
+                        .foregroundStyle(vm.uiTheme.dimText)
+                        .multilineTextAlignment(.center)
+                        .padding(.top, 24)
+                } else {
+                    ForEach(vm.bookmarks) { b in
+                        bookmarkRow(b)
+                    }
+                }
+            }
+            .padding(10)
         }
     }
 

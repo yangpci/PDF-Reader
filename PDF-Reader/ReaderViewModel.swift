@@ -32,6 +32,11 @@ final class ReaderViewModel: ObservableObject {
 
     private static let maxShelfHistory = 30
 
+    enum ReaderSidebarTab {
+        case toc
+        case bookmarks
+    }
+
     @Published var uiTheme: AppTheme = .midnight
     @Published var mode: Mode = .welcome
 
@@ -65,8 +70,7 @@ final class ReaderViewModel: ObservableObject {
 
     @Published var statusText: String = "就绪"
     @Published var showingSettings = false
-    @Published var showingToc = false
-    @Published var showingBookmarks = false
+    @Published var activeSidebar: ReaderSidebarTab?
     @Published var showingBookmarkPrompt = false
     @Published var bookmarkPromptDefault: String = ""
     @Published var bookmarkDraftLabel: String = ""
@@ -454,17 +458,30 @@ final class ReaderViewModel: ObservableObject {
     }
 
     func toggleToc() {
-        showingToc.toggle()
-        if showingToc, mode == .epub {
-            epubTocPull = UUID()
+        if activeSidebar == .toc {
+            activeSidebar = nil
+        } else {
+            showSidebar(.toc)
         }
     }
 
     func toggleBookmarks() {
-        showingBookmarks.toggle()
-        if showingBookmarks, mode == .epub {
-            epubTocPull = UUID()
-            resolveEpubBookmarkTitlesIfNeeded()
+        if activeSidebar == .bookmarks {
+            activeSidebar = nil
+        } else {
+            showSidebar(.bookmarks)
+        }
+    }
+
+    func showSidebar(_ tab: ReaderSidebarTab) {
+        activeSidebar = tab
+        if mode == .epub {
+            if tab == .toc {
+                epubTocPull = UUID()
+            } else {
+                epubTocPull = UUID()
+                resolveEpubBookmarkTitlesIfNeeded()
+            }
         }
     }
 
@@ -743,7 +760,7 @@ final class ReaderViewModel: ObservableObject {
         bookmarks = persistence.bookmarks[k] ?? []
         persist()
         showingBookmarkPrompt = false
-        showingBookmarks = true
+        activeSidebar = .bookmarks
         setStatus("已添加书签: \(label)")
     }
 
@@ -766,7 +783,7 @@ final class ReaderViewModel: ObservableObject {
         persistence.bookmarks[k]!.append(row)
         bookmarks = persistence.bookmarks[k] ?? []
         persist()
-        showingBookmarks = true
+        activeSidebar = .bookmarks
         setStatus("已添加书签: \(pending.label)")
     }
 
@@ -780,13 +797,13 @@ final class ReaderViewModel: ObservableObject {
 
     func jumpOutline(_ entry: PDFOutlineEntry) {
         goPdfPage(entry.page)
-        showingToc = false
+        activeSidebar = nil
     }
 
     func jumpEpubToc(href: String) {
         tocJumpToken = UUID()
         tocJumpHref = href
-        showingToc = false
+        activeSidebar = nil
     }
 
     func jumpBookmark(_ b: ReaderBookmark) {
@@ -801,7 +818,7 @@ final class ReaderViewModel: ObservableObject {
             setStatus("该书签缺少位置信息")
             return
         }
-        showingBookmarks = false
+        activeSidebar = nil
     }
 
     func bookmarkPageLabel(_ b: ReaderBookmark) -> String? {
